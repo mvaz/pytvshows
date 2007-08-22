@@ -1,0 +1,10 @@
+PyTVShows
+=========
+
+To install:
+$ python setup.py install
+
+Please report bugs on sourceforge: http://sourceforge.net/projects/pytvshows/
+
+This should work on all platforms, but it has only been tested on Linux. At
+some point I'll write up how to use it with rTorrent.

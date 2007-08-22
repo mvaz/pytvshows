@@ -26,7 +26,7 @@ import urllib
 
 warn = sys.stderr
 
-__version__ = '0.1+svn'
+__version__ = '0.1'
 help_message = '''pytvshows %s
 Usage: pytvshows [options]
 
