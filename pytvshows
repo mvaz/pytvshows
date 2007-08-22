@@ -499,8 +499,6 @@ def main(argv=None):
         args = {
             'human_name': None,
             'show_type': None,
-            'human_name': None,
-            'show_type': None,
             'season': None,
             'episode': None,
             'date': None,
