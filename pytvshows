@@ -13,6 +13,8 @@ by Ben Firshman
 
 # TODO:
 # * Support range of episodes (21-22 for example)
+# * Check more than one episode in Show.get_details() in case of 
+#   seasonepisode special
 
 import ConfigParser
 import datetime
@@ -21,7 +23,11 @@ import getopt
 import operator
 import os
 import re
+import socket; socket_errors = []
+for e in ['error', 'gaierror']:
+	if hasattr(socket, e): socket_errors.append(getattr(socket, e))
 import sys
+import time
 import urllib
 
 warn = sys.stderr
@@ -75,10 +81,11 @@ config = {
 
 class Episode(object):
     """The parent class for any episode object"""
-    def __init__(self, show, torrent_url, published_time):
+    def __init__(self, show, torrent_url, published_time, quality):
         self.show = show
         self.torrent_url = torrent_url
         self.published_time = published_time
+        self.quality = quality
         
     def download(self):
         if os.path.exists(config['output_dir']):
@@ -109,10 +116,9 @@ class EpisodeWithSeasonAndEpisode(Episode):
     def __init__(self, show, torrent_url, published_time, season, episode, 
                     quality):
         super(EpisodeWithSeasonAndEpisode, self).__init__(show, torrent_url,
-            published_time)
+            published_time, quality)
         self.season = season
         self.episode = episode
-        self.quality = quality
     
     def torrent_file(self):
         name = self.clean_name(self.show.human_name)
@@ -120,8 +126,7 @@ class EpisodeWithSeasonAndEpisode(Episode):
         
     def __str__(self):
         return "%s: Season %s, Episode %s, Quality %s" % \
-                (self.show, self.season, self.episode, self.quality)
-        
+                    (self.show, self.season, self.episode, self.quality)
 class EpisodeWithDate(Episode):
     """
     Represents an episode classified by a date.
@@ -129,9 +134,8 @@ class EpisodeWithDate(Episode):
     """
     def __init__(self, show, torrent_url, published_time, date, quality):
         super(EpisodeWithDate, self).__init__(show, torrent_url, 
-            published_time)
+            published_time, quality)
         self.date = date
-        self.quality = quality
     
     def torrent_file(self):
         name = self.clean_name(self.show.human_name)
@@ -146,9 +150,9 @@ class EpisodeWithTitle(Episode):
     Represents an episode with no classification.
     For example "Discovery Channel"
     """
-    def __init__(self, show, torrent_url, published_time, title):
+    def __init__(self, show, torrent_url, published_time, title, quality):
         super(EpisodeWithTitle, self).__init__(show, torrent_url, 
-            published_time)
+            published_time, quality)
         self.title = title
         
     def torrent_file(self):
@@ -169,8 +173,17 @@ class Show(object):
         self.show_type = args['show_type']
         self.season = args['season']
         self.episode = args['episode']
-        self.date = args['date']
-        self.time = args['time']
+        #YYYY-MM-DD HH:MM:SS
+        if args['date']:
+            self.date = datetime.datetime(*(time.strptime(
+                            args['date'], "%Y-%m-%d %H:%M:%S")[0:6])).date()
+        else:
+            self.date = None
+        if args['time']:
+            self.time = datetime.datetime(*(time.strptime(
+                            args['time'], "%Y-%m-%d %H:%M:%S")[0:6]))
+        else:
+            self.time = None
         self.ignoremissingdetails = bool(args['ignoremissingdetails'])
         self.rss = None
         self._get_rss_feed()
@@ -308,7 +321,33 @@ class Show(object):
                 r = re.compile('Episode\s*:\ ([0-9]*?)$')
                 episode_match = r.search(episode.description)
                 if not season_match or not episode_match:
-                    if not self.ignoremissingdetails:
+                    # This might be a special with a title
+                    r = re.compile('Show\s*Title\s*:\s*(.*?);')
+                    title_match = r.search(episode.description)
+                    if title_match and title_match.group(1) != 'n/a' \
+                                        and title_match.group(1) != '':
+                        title = title_match.group(1)
+                        if config["verbose"]:
+                            print "Found episode with title %s and no " \
+                            "season or episode in seasonepisode show." % title
+                        quality = 0
+                        for key, value in config["quality_matches"].items():
+                            if key in episode.title:
+                                quality = value
+                                break
+                        date = datetime.datetime(* episode.updated_parsed[:6])
+                        obj = EpisodeWithTitle(
+                            self,
+                            episode.link,
+                            date,
+                            title,
+                            quality)
+                        last_key = 0
+                        for key in episodes.keys():
+                            if key[0] == 0 and key[1] > last_key:
+                                last_key = key[1]
+                        episodes[0, last_key] = [obj]
+                    elif not self.ignoremissingdetails:
                         print >> warn, 'W: Could not match season and/or ' \
                             'episode in %s' % episode.description
                 else:
@@ -319,17 +358,21 @@ class Show(object):
                             break
                     season_num = int(season_match.group(1))
                     episode_num = int(episode_match.group(1))
-                    obj = EpisodeWithSeasonAndEpisode(
-                        self,
-                        episode.link,
-                        datetime.datetime(* episode.updated_parsed[:6]),
-                        season_num,
-                        episode_num,
-                        quality)
-                    try:
-                        episodes[season_num, episode_num].append(obj)
-                    except KeyError:
-                        episodes[season_num, episode_num] = [obj]
+                    if season_num != 0 and episode_num != 0:
+                        obj = EpisodeWithSeasonAndEpisode(
+                            self,
+                            episode.link,
+                            datetime.datetime(* episode.updated_parsed[:6]),
+                            season_num,
+                            episode_num,
+                            quality)
+                        try:
+                            episodes[season_num, episode_num].append(obj)
+                        except KeyError:
+                            episodes[season_num, episode_num] = [obj]
+                    elif config['verbose']:
+                        print 'Season or episode number is 0 in %s' \
+                                % episode.description
             elif self.show_type == 'date':
                 r = re.compile('Episode\s*Date:\s*([0-9\-]+)$')
                 date_match = r.search(episode.description)
@@ -343,8 +386,8 @@ class Show(object):
                         if key in episode.title:
                             quality = value
                             break
-                    date = datetime.datetime.strptime(date_match.group(1),
-                        "%Y-%m-%d").date()
+                    date = datetime.datetime(*(time.strptime(
+                        date_match.group(1), "%Y-%m-%d")[0:6])).date()
                     obj = EpisodeWithDate(
                         self,
                         episode.link,
@@ -365,12 +408,18 @@ class Show(object):
                     title = ""
                 else:
                     title = title_match.group(1)
+                quality = 0
+                for key, value in config["quality_matches"].items():
+                    if key in episode.title:
+                        quality = value
+                        break
                 date = datetime.datetime(* episode.updated_parsed[:6])
                 obj = EpisodeWithTitle(
                     self,
                     episode.link,
                     date,
-                    title)
+                    title,
+                    quality)
                 try:
                     episodes[date].append(obj)
                 except KeyError:
@@ -394,8 +443,24 @@ class Show(object):
                 i += 1
         wanted_quality = min(config["quality"], best_quality)
         # Only get unseen episodes
+        # Check seasonepisode specials
+        last_time = None
+        if self.show_type == 'seasonepisode' and (0, 0) in episodes.keys():
+            last_time = None
+            for key in episodes.keys():
+                if key[0] == 0:
+                    if last_time is None \
+                            or episodes[key][0].published_time > last_time:
+                        last_time = episodes[key][0].published_time
+                    if self.time \
+                            and episodes[key][0].published_time <= self.time:
+                        del episodes[key]
+            if last_time:
+                self.time = last_time
+        # Check normal episodes
         for key in episodes.keys():
-            if key <= min_key:
+            if (self.show_type != 'seasonepisode' or key[1] != 0) \
+                    and key <= min_key:
                 del episodes[key]
         # First try : download the episodes for which we have the wanted
         # quality
