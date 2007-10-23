@@ -251,6 +251,11 @@ class Show(object):
         if self.show_type == 'seasonepisode' \
                 and (not self.season or not self.episode):
             (self.season, self.episode) = max_key
+            # So we can keep track of specials
+            # TODO: need a better way to do this, this is a quick hack. 
+            # If there is a special after the latest normal episode, it will
+            # download it and we don't want that
+            self.time = self.episodes[max_key][0].published_time
         elif self.show_type == 'date' and not self.date:
             self.date = max_key
         elif self.show_type == 'time' and not self.time:
@@ -459,7 +464,7 @@ class Show(object):
                 self.time = last_time
         # Check normal episodes
         for key in episodes.keys():
-            if (self.show_type != 'seasonepisode' or key[1] != 0) \
+            if (self.show_type != 'seasonepisode' or key[0] != 0) \
                     and key <= min_key:
                 del episodes[key]
         # First try : download the episodes for which we have the wanted
@@ -495,6 +500,9 @@ class Show(object):
                         downloaded_episode_keys.append(key)
         if len(downloaded_episode_keys) > 0:
             downloaded_episode_keys.sort()
+            if self.show_type == 'seasonepisode' \
+                    and downloaded_episode_keys[-1:][0][0] == 0:
+                return min_key
             return downloaded_episode_keys[-1:][0]
         return min_key
     
