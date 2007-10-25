@@ -29,6 +29,7 @@ for e in ['error', 'gaierror']:
 import sys
 import time
 import urllib
+import urllib2
 
 warn = sys.stderr
 
@@ -305,7 +306,7 @@ class Show(object):
                     exc_reason = r.bozo_exception.reason.args[1]
                 else:
                     exc_reason = r.bozo_exception.reason
-                print >>warn, "W:", exc_reason, f.url
+                print >>warn, "W:", exc_reason, url
             elif exc_type == KeyboardInterrupt:
                 raise r.bozo_exception
             else:
@@ -533,6 +534,10 @@ def main(argv=None):
             if option in ("-c", "--config"):
                 config["config_file"] = os.path.expanduser(value)
             if option in ("-f", "--feed"):
+                try:
+                    value % ''
+                except TypeError:
+                    raise Usage("Specified feed does not include %s")
                 config['feed'] = value
             if option in ("-h", "--help"):
                 print help_message
