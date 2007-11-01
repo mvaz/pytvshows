@@ -177,7 +177,7 @@ class Show(object):
         #YYYY-MM-DD HH:MM:SS
         if args['date']:
             self.date = datetime.datetime(*(time.strptime(
-                            args['date'], "%Y-%m-%d %H:%M:%S")[0:6])).date()
+                            args['date'], "%Y-%m-%d")[0:6])).date()
         else:
             self.date = None
         if args['time']:
