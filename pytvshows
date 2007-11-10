@@ -1,20 +1,36 @@
 #!/usr/bin/env python
 # encoding: utf-8
 """
-PyTVShows
-
-Downloads torrents from tvrss.net
-based on http://tvshows.sourceforge.net/
+PyTVShows - Downloads torrents from tvrss.net based on 
+http://tvshows.sourceforge.net/
 
 Depends on http://feedparser.org/
 
-by Ben Firshman
+Copyright (C) 2007, Ben Firshman
+
+This program is free software; you can redistribute it and/or
+modify it under the terms of the GNU General Public License
+as published by the Free Software Foundation; either version 2
+of the License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program; if not, write to the Free Software
+Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 """
+
+__version__ = '0.2'
 
 # TODO:
 # * Support range of episodes (21-22 for example)
 # * Check more than one episode in Show.get_details() in case of 
 #   seasonepisode special
+# * Check for dead torrent before downloading
+# * Split up into libraries
 
 import ConfigParser
 import datetime
@@ -33,7 +49,6 @@ import urllib2
 
 warn = sys.stderr
 
-__version__ = '0.1+svn'
 help_message = '''pytvshows %s
 Usage: pytvshows [options]
 

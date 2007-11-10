@@ -6,7 +6,7 @@ def normalizeWhitespace(s):
     return ' '.join(s.split())
 
 setup(name='pytvshows',
-      version='0.1+svn',
+      version='0.2',
       description='A simple, shell based tvrss.net torrent downloader.',
       author='Ben Firshman',
       author_email='ben@firshman.co.uk',
