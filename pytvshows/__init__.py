@@ -164,6 +164,8 @@ class Show(object):
         self.show_type = args['show_type']
         self.season = args['season']
         self.episode = args['episode']
+        self.etag = args.get('etag', None)
+        self.last_modified = args.get('last_modified', None)
         #YYYY-MM-DD HH:MM:SS
         if args['date']:
             self.date = datetime.datetime(*(time.strptime(
@@ -266,26 +268,28 @@ class Show(object):
         """Gets the feedparser object."""
         url = config['feed'] % self.exact_name
         logging.info("Downloading and processing %s..." % url)
-        r = feedparser.parse(url)
+        r = feedparser.parse(url, etag=self.etag, modified=self.last_modified)
         http_status = r.get('status', 200)
         http_headers = r.get('headers', {
           'content-type': 'application/rss+xml', 
           'content-length':'1'})
         exc_type = r.get("bozo_exception", Exception()).__class__
-        if http_status != 304 and not r.entries and not r.get('version', ''):
+        if not r.entries and not r.get('version', ''):
             if http_status not in [200, 302]: 
-                logging.warn("error" + http_status + url)
+                logging.warn("HTTP error %s: %s" % (http_status, url))
+            elif http_status == 304:
+                logging.info('Feed not modified since last request')
             elif 'html' in http_headers.get('content-type', 'rss'):
-                logging.warn("looks like HTML" + url)
+                logging.warn("Looks like HTML: %s" % url)
             elif http_headers.get('content-length', '1') == '0':
-                logging.warn("empty page" + url)
+                logging.warn("Empty page: %s" % url)
             elif hasattr(socket, 'timeout') and exc_type == socket.timeout:
-                logging.warn("timed out on" + url)
+                logging.warn("Timed out on %s" % url)
             elif exc_type == IOError:
-                logging.warn(r.bozo_exception + url)
+                logging.warn("%s: %s" % (r.bozo_exception, url))
             elif hasattr(feedparser, 'zlib') \
                     and exc_type == feedparser.zlib.error:
-                logging.warn("broken compression" + f.url)
+                logging.warn("Broken compression: %s" % f.url)
             elif exc_type in socket_errors:
                 exc_reason = r.bozo_exception.args[1]
                 logging.warn(exc_reason + f.url)
@@ -294,13 +298,15 @@ class Show(object):
                     exc_reason = r.bozo_exception.reason.args[1]
                 else:
                     exc_reason = r.bozo_exception.reason
-                logging.warn(exc_reason + url)
+                logging.warn("%s: %s" % (exc_reason, url))
             elif exc_type == KeyboardInterrupt:
                 raise r.bozo_exception
             else:
                 logging.error(r.get("bozo_exception", "can't process") + f.url)
             return False
         self.rss = r
+        self.etag = r.etag
+        self.last_modified = r.get('modified', None)
         return r
     
     def _parse_rss_feed(self):

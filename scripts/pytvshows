@@ -148,6 +148,8 @@ def main(argv=None):
             'date': None,
             'time': None, 
             'ignoremissingdetails': False,
+            'etag': None,
+            'last_modified': None,
         }
         for key in args.keys():
             if f.has_option(exact_name, key):
