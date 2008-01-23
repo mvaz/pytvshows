@@ -33,8 +33,8 @@ setup(
         "Environment :: Console",
         ],
     
-    scripts = ['pytvshows',],
-    py_modules = ['pytvshows',],
+    scripts = ['scripts/pytvshows',],
+    packages = ['pytvshows',],
     
     install_requires = [
         'FeedParser>=4.0',

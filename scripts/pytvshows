@@ -24,6 +24,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 __version__ = '0.2+svn'
 
 import pytvshows
+import pytvshows.logger as logging
 
 import ConfigParser
 import getopt
@@ -51,30 +52,34 @@ Options:
                     Directory to save torrents if output_dir doesn't exist.
                     Handy for rtorrent if you move the directory to disable
                     downloads.
-  -qQUAL, --quality=QUAL
+  -QQUAL, --quality=QUAL
                     The TV show quality required. 'normal', 'high' or 
                     'veryhigh', where 'high' is high resolution and 'veryhigh'
                     is 720p. Default: normal
+  -lLOGFILE, --log  LOGFILE
+                    Location to save log file
   -v, --verbose     Print verbose output
+  -q, --quiet       Print only error messages
 ''' % __version__
 
 commands = ['subscribe', 'unsubscribe', 'run']
 config_file = os.path.expanduser("~/.pytvshows.cfg")
-verbose = False
 
 class Usage(Exception):
     def __init__(self, msg):
         self.msg = msg
 
 def main(argv=None):
+    # verbosity is incremented every -v flag, decremented every -q flag
+    verbosity = 0 
     if argv is None:
         argv = sys.argv
     try:
         try:
             opts, args = getopt.getopt(argv[1:], 
-                "c:f:ho:O:q:v", 
+                "c:f:ho:O:Q:vql:", 
                 ["config=", "feed=", "help", "output_dir=", "output_dir2=", 
-                    "quality=", "verbose"])
+                    "quality=", "verbose", "quiet", "log="])
         except getopt.error, msg:
             raise Usage(msg)
     
@@ -96,7 +101,7 @@ def main(argv=None):
                 pytvshows.config['output_dir'] = os.path.expanduser(value)
             if option in ("-O", "--output_dir2"):
                 pytvshows.config['output_dir2'] = os.path.expanduser(value)
-            if option in ("-q", "--quality"):
+            if option in ("-Q", "--quality"):
                 if value == "normal":
                     pytvshows.config['quality'] = 1
                 elif value == "high":
@@ -106,9 +111,18 @@ def main(argv=None):
                 else:
                     raise Usage("Invalid quality")
             if option in ("-v", "--verbose"):
-                global verbose # what's a better way to do this?
-                verbose = True
-                pytvshows.verbose = True
+                pytvshows.console.decreaseLevel()
+            if option in ("-q", "--quiet"):
+                pytvshows.console.increaseLevel()
+            if option in ("-l", "--log"):
+                logfile = os.path.expanduser(value)
+                logtofile = logging.FileHandler(logfile)
+                logtofile.setLevel(logging.INFO)
+                format_str = '%(asctime)s %(levelname)s (%(lineno)d) ' \
+                    '%(message)s'
+                formatter = logging.Formatter(format_str)
+                logtofile.setFormatter(formatter)
+                logging.getLogger('').addHandler(logtofile)
         #if args:
         #    if command not in commands:
         #        raise Usage("Invalid command.")
@@ -119,9 +133,9 @@ def main(argv=None):
         print >> warn, sys.argv[0].split("/")[-1] + ": " + str(err.msg)
         print >> warn, "\t for help use --help"
         return 2
-    if verbose:
-        print "pytvshows %s" % __version__
-        print "Loading configuration file..."
+
+    logging.info("pytvshows %s" % __version__)
+    logging.debug("Loading configuration file...")
     f = ConfigParser.ConfigParser()
     f.read(config_file)
     for exact_name in f.sections():
@@ -138,15 +152,13 @@ def main(argv=None):
         for key in args.keys():
             if f.has_option(exact_name, key):
                 args[key] = f.get(exact_name, key)
-        if verbose:
-            print "Getting episodes for %s..." % exact_name
+        logging.info("Getting episodes for %s..." % exact_name)
         show = pytvshows.Show(exact_name, args)
         show.get_new_episodes()
         for (key, value) in args.items():
             if getattr(show, key) != value:
                 f.set(exact_name, key, getattr(show, key))
-    if verbose:
-        print "Saving configuration file..."
+    logging.debug("Saving configuration file...")
     fp = open(config_file+'-temp', "w+")
     f.write(fp)
     fp.close()
