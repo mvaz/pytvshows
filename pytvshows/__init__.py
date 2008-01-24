@@ -23,12 +23,14 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 __version__ = '0.2+svn'
 
+USER_AGENT = "PyTVShows/%s +http://pytvshows.sourceforge.net/" % __version__
+
 # TODO:
 # * Support range of episodes (21-22 for example)
 # * Check more than one episode in Show.get_details() in case of 
 #   seasonepisode special
-# * Check for dead torrent before downloading
 
+import bencode
 import pytvshows.logger as logging
 
 import datetime
@@ -36,9 +38,11 @@ import feedparser
 import operator
 import os
 import re
+import sha
 import socket; socket_errors = []
 for e in ['error', 'gaierror']:
     if hasattr(socket, e): socket_errors.append(getattr(socket, e))
+socket.setdefaulttimeout(10) # Stops ridiculously long hangs
 import sys
 import time
 import urllib
@@ -86,18 +90,150 @@ class Episode(object):
             path = os.path.join(config['output_dir2'], self.torrent_file())
         else:
             logging.warn("Output directory doesn't exist.")
-        logging.info("Downloading %s to %s" % (self.torrent_url, path))
+        logging.info("Downloading %s..." % self.torrent_url)
+        request = urllib2.Request(self.torrent_url)
+        request.add_header('User-Agent', USER_AGENT)
         try:
-            urllib.urlretrieve(self.torrent_url, path)
-            return True
-        except IOError, e:
-            logging.warn("Could not download torrent: %s" % e)
+            f = urllib2.urlopen(request)
+        except urllib2.URLError, e:
+            if hasattr(e, "reason"):
+                logging.warn("Could not reach server: %s" % e.reason)
+            elif hasattr(e, "code"):
+                logging.warn(e)
+            else:
+                logging.warn("Unknown error: %s", e)
+            logging.warn("Downloading torrent failed, skipping.")
             return False
-    def clean_name(self, name):
+        torrent = f.read()
+        # Check if torrent is valid
+        try:
+            torrent_dict = bencode.bdecode(torrent)
+        except bencode.BTFailure:
+            logging.warn("Downloaded file is either corrupted or not a" 
+                         "torrent, skipping.")
+            return False
+        if 'announce' not in torrent_dict.keys():
+            logging.warn("Tracker not found in torrent file, skipping.")
+            return False
+        logging.debug('Torrent "%s" downloaded, %s bytes' 
+                        % (torrent_dict['info']['name'], len(torrent)))
+        # Check if trackers work
+        logging.info("Checking tracker (%s)..." % torrent_dict['announce'])
+        chosen_tracker = None
+        no_scrape_trackers = []
+        # Step 1: Check main tracker, make a note if it doesn't support scrape
+        scrape_url = self._get_scrape_url(torrent_dict['announce'])
+        if scrape_url:
+            if self._check_tracker(scrape_url, torrent_dict, scrape=True):
+                chosen_tracker = torrent_dict['announce']
+        else:
+            logging.debug("Tracker does not support scraping.")
+            no_scrape_trackers.append(torrent_dict['announce'])
+        # Step 2: Check announce-list trackers, again make a note of no scrape
+        if not chosen_tracker:
+            logging.debug("announce doesn't work, checking announce-list")
+            if 'announce-list' not in torrent_dict \
+                    or not torrent_dict['announce-list']:
+                logging.debug("announce-list key not in torrent")
+            else:
+                for url in torrent_dict['announce-list']:
+                    logging.info("Checking tracker (%s)..." % url)
+                    scrape_url = self._get_scrape_url(url)
+                    if scrape_url:
+                        if self._check_tracker(scrape_url, torrent_dict, 
+                                scrape=True):
+                            chosen_tracker = url
+                            break
+                    else:
+                        logging.debug("Tracker does not support scraping.")
+                        no_scrape_trackers.append(url)
+        # Step 3: If these all fail to find a working tracker, use first 
+        # tracker without scraping support that can be connected to.
+        if not chosen_tracker:
+            logging.debug("Falling back to a tracker without scrape support.")
+            for url in no_scrape_trackers:
+                request = urllib2.Request(req_url)
+                request.add_header('User-Agent', USER_AGENT)
+                try:
+                    f = urllib2.urlopen(request)
+                except urllib2.URLError, e:
+                    continue
+                chosen_tracker = url
+                break
+        if not chosen_tracker:
+            logging.info("No working tracker found, skipping.")
+            return False
+        logging.info("Working tracker found (%s), saving torrent to %s..."
+                        % (chosen_tracker, path))
+        try:
+            f = open(path, "w")
+        except IOError, e:
+            logging.warn("Can't open torrent file for writing: %s", e)
+            return False
+        try:
+            f.write(torrent)
+        finally:
+            f.close()
+        return torrent_dict
+    
+    def download_retry(self, count=3):
+        i=0
+        while i < count:
+            ret = self.download()
+            if ret:
+                return ret
+            logging.info("Torrent download failed, retrying...")
+            i+=1
+        return False
+    
+    def _check_tracker(self, url, torrent_dict, scrape=False):
+        if not scrape:
+            url = self._get_scrape_url(url)
+            if not url:
+                # Announce URL does not support scrape, give up
+                return False
+        info_hash = sha.new(bencode.bencode(torrent_dict['info'])).digest()
+        req_url = url+"?"+urllib.urlencode({'info_hash': info_hash}) 
+        request = urllib2.Request(req_url)
+        request.add_header('User-Agent', USER_AGENT)
+        try:
+            f = urllib2.urlopen(request)
+        except urllib2.URLError, e:
+            if hasattr(e, "reason"):
+                logging.info("Could not reach tracker: %s" % e.reason)
+            elif hasattr(e, "code"):
+                logging.info(e)
+            else:
+                logging.info("Unknown error: %s", e)
+            return False
+        try:
+            tracker_response = bencode.bdecode(f.read())
+        except bencode.BTFailure:
+            logging.info("Unrecognised tracker response. Torrent may not"
+                         "exist on tracker.")
+            return False
+        logging.debug("Valid tracker response: %s" % tracker_response)
+        if "files" not in tracker_response.keys() \
+                or not tracker_response["files"]:
+            logging.info("Torrent does not exist on tracker.")
+            return False
+        return tracker_response
+        
+    def _get_scrape_url(self, announce_url):
+        """Converts an announce URL to a scrape URL."""
+        # http://tech.groups.yahoo.com/group/BitTorrent/message/3275
+        l = announce_url.split('/')
+        if l[-1] != "announce":
+            return False
+        l[-1] = "scrape"
+        return "/".join(l)
+    
+    def _clean_name(self, name):
         name = name.replace("/", " ")
         name = name.replace(":", " ")
         name = name.replace(".", " ")
         return name
+
         
 class EpisodeWithSeasonAndEpisode(Episode):
     """
@@ -112,7 +248,7 @@ class EpisodeWithSeasonAndEpisode(Episode):
         self.episode = episode
     
     def torrent_file(self):
-        name = self.clean_name(self.show.human_name)
+        name = self._clean_name(self.show.human_name)
         return "%s %02dx%02d.torrent" % (name, self.season, self.episode)
         
     def __str__(self):
@@ -129,7 +265,7 @@ class EpisodeWithDate(Episode):
         self.date = date
     
     def torrent_file(self):
-        name = self.clean_name(self.show.human_name)
+        name = self._clean_name(self.show.human_name)
         return "%s %s.torrent" % (name, self.date)
         
     def __str__(self):
@@ -147,8 +283,8 @@ class EpisodeWithTitle(Episode):
         self.title = title
         
     def torrent_file(self):
-        name = self.clean_name(self.show.human_name)
-        title = self.clean_name(self.title)
+        name = self._clean_name(self.show.human_name)
+        title = self._clean_name(self.title)
         return "%s %s.torrent" % (name, title)
     
     def __str__(self):
@@ -268,7 +404,12 @@ class Show(object):
         """Gets the feedparser object."""
         url = config['feed'] % self.exact_name
         logging.info("Downloading and processing %s..." % url)
-        r = feedparser.parse(url, etag=self.etag, modified=self.last_modified)
+        r = feedparser.parse(
+            url,
+            etag = self.etag,
+            modified = self.last_modified,)
+            #agent = USER_AGENT,) # FIXME: only one entry is downloaded with 
+                                  # this for some reason
         http_status = r.get('status', 200)
         http_headers = r.get('headers', {
           'content-type': 'application/rss+xml', 
@@ -466,7 +607,7 @@ class Show(object):
             for ep in ep_set:
                 if ep.quality == wanted_quality:
                     logging.info("Downloading %s..." % ep)
-                    if ep.download():
+                    if ep.download_retry():
                         downloaded_episode_keys.append(key)
                         break
         # Second try : download the episodes for which the quality delay has
@@ -487,7 +628,7 @@ class Show(object):
                     if not episode:
                         episode = ep_set[0]
                     logging.info("Downloading %s..." % episode)
-                    if episode.download():
+                    if episode.download_retry():
                         downloaded_episode_keys.append(key)
         if len(downloaded_episode_keys) > 0:
             downloaded_episode_keys.sort()

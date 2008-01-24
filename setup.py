@@ -38,6 +38,5 @@ setup(
     
     install_requires = [
         'FeedParser>=4.0',
-        #'BitTorrent-bencode>=5.0.8',
         ],
     )
