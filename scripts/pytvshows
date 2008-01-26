@@ -31,39 +31,71 @@ import getopt
 import os
 import sys
 
-warn = sys.stderr
-
 help_message = '''pytvshows %s
-Usage: pytvshows [options]
+Usage: pytvshows [options] [-d] [-c]
+       pytvshows [options] command [arg1 [arg2 ...]]
 
 pytvshows downloads torrents for TV shows from RSS feeds provided by
 tvRSS.net. It is based on http://tvshows.sourceforge.net/.
 
-Options: 
-  -cFILE, --config FILE
-                  Path to config file. Default: ~/.pytvshows/config
-  -fFEED, --feed=FEED
+Commands (if none is specified, pytvshows will check feeds):
+  download show SExEP[:[SExEP]]
+                    Download a specific episode (SExEP), all from a specific
+                    episode to the latest (SExEP:) or a range of episodes
+                    (SExEP:SExEP), where "SE" and "EP" are season and episode 
+                    respectively and "show" is the tvRSS show_name in the URL.
+  list-shows        Prints a full list of shows.
+
+Options:
+  -h, --help        This help message
+  -c FILE, --config=FILE
+                    If checking feeds, path to config file. 
+                    Default: ~/.pytvshows/config
+  -d, --daemon      Run as a daemon in the background. (NOT IMPLEMENTED)
+  -v, --verbose     Increase verbosity level.
+  -q, --quiet       Decrease verbosity level. Use once to reduce messages to a 
+                    sensible level for cron jobs (WARN).
+  
+Configuration options (overrides values in config file):
+  -f FEED, --feed=FEED
                     Override the tvrss.net feed. %%s is replaced with the 
                     exact show name.
-  -h, --help        This help message
-  -oDIR, --output_dir=DIR  
+  -i MINS, --interval=MINS
+                    If running as a daemon, interval to check feeds. Default
+                    and minimum: 30
+  -l FILE, --log=FILE
+                    Location to save log file.
+  -o DIR, --output-directory=DIR  
                     Directory to save torrents. Default: ~/
-  -ODIR, --output_dir2=DIR
+  -O DIR, --output-directory2=DIR
                     Directory to save torrents if output_dir doesn't exist.
                     Handy for rtorrent if you move the directory to disable
                     downloads.
-  -QQUAL, --quality=QUAL
+  -p FILE, --pid-file=FILE
+                    Path to daemon PID file. Default: ~/.pytvshows/pid
+  -Q QUAL, --quality=QUAL
                     The TV show quality required. 'normal', 'high' or 
                     'veryhigh', where 'high' is high resolution and 'veryhigh'
                     is 720p. Default: normal
-  -lLOGFILE, --log  LOGFILE
-                    Location to save log file
-  -v, --verbose     Print verbose output
-  -q, --quiet       Print only error messages
+  -s FILE, --state-file=FILE
+                    Path to state file. Default: ~/.pytvshows/state
+  -x FILE, --socket-file=FILE
+                    Path to daemon socket file. Default: ~/.pytvshows/socket
 ''' % __version__
 
-commands = ['subscribe', 'unsubscribe', 'run']
+# script config defaults (library config is found in pytvshows/__init__.py)
 config_file = os.path.expanduser("~/.pytvshows/config")
+config = {
+    'interval': 30,
+    'log': None,
+    'pid-file': os.path.expanduser("~/.pytvshows/pid"),
+    'state-file': os.path.expanduser("~/.pytvshows/state"),
+    'socket-file': os.path.expanduser("~/.pytvshows/socket")
+}
+
+# Merge and conjoin the script and library config defaults
+config.update(pytvshows.config)
+pytvshows.config = config
 
 class Usage(Exception):
     def __init__(self, msg):
@@ -71,127 +103,211 @@ class Usage(Exception):
 
 def main(argv=None):
     # verbosity is incremented every -v flag, decremented every -q flag
-    verbosity = 0 
+    verbosity = 0
+    daemon = False
     if argv is None:
         argv = sys.argv
     try:
         try:
-            opts, args = getopt.getopt(argv[1:], 
-                "c:f:ho:O:Q:vql:", 
-                ["config=", "feed=", "help", "output_dir=", "output_dir2=", 
-                    "quality=", "verbose", "quiet", "log="])
+            opts, args = getopt.gnu_getopt(argv[1:], 
+                "c:df:hi:l:o:O:p:qs:Q:vx:", 
+                ["config=", "daemon", "feed=", "help", "interval=", "log=", 
+                 "output-directory=", "output-directory2=", "pid-file=", 
+                 "quality=", "quiet", "socket-file=", "state-file=", 
+                 "verbose"])
         except getopt.error, msg:
             raise Usage(msg)
-    
+        config_override = {}
         # option processing
         for option, value in opts:
-            if option in ("-c", "--config"):
-                global config_file
-                config_file = os.path.expanduser(value)
-            if option in ("-f", "--feed"):
-                try:
-                    value % ''
-                except TypeError:
-                    raise Usage("Specified feed does not include %s")
-                pytvshows.config['feed'] = value
+            # options
             if option in ("-h", "--help"):
                 print help_message
                 return
-            if option in ("-o", "--output_dir"):
-                pytvshows.config['output_dir'] = os.path.expanduser(value)
-            if option in ("-O", "--output_dir2"):
-                pytvshows.config['output_dir2'] = os.path.expanduser(value)
-            if option in ("-Q", "--quality"):
-                if value == "normal":
-                    pytvshows.config['quality'] = 1
-                elif value == "high":
-                    pytvshows.config['quality'] = 2
-                elif value == "veryhigh":
-                    pytvshows.config['quality'] = 3
-                else:
-                    raise Usage("Invalid quality")
-            if option in ("-v", "--verbose"):
+            elif option in ("-c", "--config"):
+                global config_file
+                config_file = os.path.expanduser(value)
+            elif option in ("-d", "--daemon"):
+                daemon = True
+            elif option in ("-v", "--verbose"):
                 pytvshows.console.decreaseLevel()
-            if option in ("-q", "--quiet"):
+            elif option in ("-q", "--quiet"):
                 pytvshows.console.increaseLevel()
-            if option in ("-l", "--log"):
-                logfile = os.path.expanduser(value)
-                logtofile = logging.FileHandler(logfile)
+            # config overrides. error checking is done below
+            elif option in ("-f", "--feed"):
+                config_override['feed'] = value
+            elif option in ("-i", "--interval"):
+                config_override['interval'] = value
+            elif option in ("-l", "--log"):
+                config_override['log'] = value
+            elif option in ("-o", "--output_directory"):
+                config_override['output-directory'] = value
+            elif option in ("-O", "--output-directory2"):
+                config_override['output-directory2'] = value
+            elif option in ("-Q", "--quality"):
+                config_override['quality'] = value
+            elif option in ("-s", "--state-file"):
+                config_override['state-file'] = value
+            elif option in ("-x", "--socket-file"):
+                config_override['socket-file'] = value
+    except Usage, err:
+        print >> sys.stderr, sys.argv[0].split("/")[-1] + ": " + str(err.msg)
+        print >> sys.stderr, "\t for help use --help"
+        return 2
+    
+    logging.debug("pytvshows %s" % __version__)
+    logging.debug("Log level: DEBUG")
+    
+    # COMMANDS
+    if len(args) > 0:
+        if args[0] == 'download':
+            logging.error("Not implemented")
+        elif args[0] == 'list-shows':
+            logging.error("Not implemented")
+        else:
+            logging.error("Unrecognised command: '%s'" % args[0])
+    
+    # CHECK FEEDS
+    else:
+        if not os.path.exists(config_file):
+            logging.error("Config file (%s) does not exist. " 
+                          "Please create it." % config_file)
+            return 1
+        logging.debug("Loading configuration file (%s)..." 
+                        % config_file)
+        config_obj = ConfigParser.ConfigParser()
+        config_obj.read(config_file)
+        if len(config_obj.sections()) == 0 \
+                or (config_obj.has_section('pytvshows')
+                and len(config_obj.sections()) == 1):
+            logging.error("No shows in configuration, pytvshows will do "
+                          "nothing!")
+            return 1
+        
+        # General configuration
+        for key in config.keys():
+            if key in config_override:
+                config[key] = config_override[key]
+            elif config_obj.has_option('pytvshows', key):
+                config[key] = config_obj.get('pytvshows', key)
+            else:
+                # use default value, no cleaning
+                continue
+            # cleanup/error check
+            if key == "feed":
+                try:
+                    config[key] % ''
+                except TypeError:
+                    logging.error("Specified feed does not include %s.")
+                    return 1
+            elif key == "interval":
+                config[key] = int(config[key])
+                if config[key] < 30:
+                    logging.error("Feed checking interval must be at least "
+                                  "30.")
+                    return 1
+            elif key == "log":
+                config[key] = os.path.expanduser(config[key])
+                logging.debug("Opening log file (%s)..." % config['log'])
+                logtofile = logging.FileHandler(config['log'])
                 logtofile.setLevel(logging.INFO)
-                format_str = '%(asctime)s %(levelname)s (%(lineno)d) ' \
-                    '%(message)s'
-                formatter = logging.Formatter(format_str)
+                formatter = logging.Formatter('%(asctime)s %(levelname)s: '
+                                              '%(message)s')
                 logtofile.setFormatter(formatter)
                 logging.getLogger('').addHandler(logtofile)
-        #if args:
-        #    if command not in commands:
-        #        raise Usage("Invalid command.")
-        #    command = args[0]
-        #else:
-        #    raise Usage("No command specified.")
-    except Usage, err:
-        print >> warn, sys.argv[0].split("/")[-1] + ": " + str(err.msg)
-        print >> warn, "\t for help use --help"
-        return 2
-
-    logging.info("pytvshows %s" % __version__)
-    logging.debug("Log level: DEBUG")
-    if not os.path.exists(config_file):
-        logging.error("Config file (%s) does not exist. Please create it." \
-            % config_file)
-        return 1
-    logging.debug("Loading configuration file...")
-    f = ConfigParser.ConfigParser()
-    f.read(config_file)
-    if not f.sections:
-        logging.error("No shows in configuration, pytvshows will do nothing!")
-        return 1
-    for exact_name in f.sections():
-        l = f.options(exact_name)
-        args = {
-            'human_name': None,
-            'show_type': None,
-            'season': None,
-            'episode': None,
-            'date': None,
-            'time': None, 
-            'ignoremissingdetails': False,
-            'etag': None,
-            'last_modified': None,
-        }
-        for key in args.keys():
-            if f.has_option(exact_name, key):
-                args[key] = f.get(exact_name, key)
-        logging.info("Getting episodes for %s..." % exact_name)
-        show = pytvshows.Show(exact_name, args)
-        show.get_new_episodes()
-        for (key, value) in args.items():
-            if getattr(show, key) != value:
-                f.set(exact_name, key, getattr(show, key))
-    logging.debug("Saving configuration file...")
-    try:
-        fp = open(config_file+'-temp', "w")
-    except IOError, e:
-        logging.error("Can't open %s for writing: %s"
-            % (config_file+'-temp', e))
-        return 1
-    try:
-        f.write(fp)
-    finally:
-        fp.close()
-    if sys.platform[:3] == 'win' or sys.platform[-3:] == 'win':
+            elif key == "output-directory":
+                config[key] = os.path.expanduser(config[key])
+            elif key == "output-directory2":
+                config[key] = os.path.expanduser(config[key])
+            elif key == "quality":
+                if config["quality"] == "normal":
+                    config["quality"] = 1
+                elif config["quality"] == "high":
+                    config["quality"] = 2
+                elif config["quality"] == "veryhigh":
+                    config["quality"] = 3
+                else:
+                    logging.error("Selected quality is invalid: %s" 
+                                    % config["quality"])
+                    return 1
+            elif key == "state-file":
+                config[key] = os.path.expanduser(config[key])
+            elif key == "socket-file":
+                config[key] = os.path.expanduser(config[key])
+    
+        # State file
+        if not os.path.exists(config['state-file']):
+            try:
+                open(config['state-file'], "w").close()
+            except IOError, e:
+                logging.error("Can't create state file: %s" % e)
+                return 1
+        logging.debug("Loading state file (%s)..." 
+                        % config['state-file'])
+        state_obj = ConfigParser.ConfigParser()
+        state_obj.read(config['state-file'])
+        if len(state_obj.sections()) == 0:
+            logging.warn("State file empty, starting from scratch.")
+        # Shows
+        for exact_name in config_obj.sections():
+            if exact_name == 'pytvshows':
+                continue
+            args = {
+                'human_name': None,
+                'show_type': None,
+                'season': None,
+                'episode': None,
+                'date': None,
+                'time': None,
+                'etag': None,
+                'last_modified': None,
+            }
+            if not state_obj.has_section(exact_name):
+                state_obj.add_section(exact_name)
+            for key in args.keys():
+                if state_obj.has_option(exact_name, key):
+                    args[key] = state_obj.get(exact_name, key)
+            logging.info("Getting episodes for %s..." % exact_name)
+            show = pytvshows.Show(exact_name, args)
+            show.get_new_episodes()
+            for (key, value) in args.items():
+                if getattr(show, key) != value:
+                    state_obj.set(exact_name, key, getattr(show, key))
+        # Clear out state file
+        for exact_name in state_obj.sections():
+            if not config_obj.has_section(exact_name):
+                state_obj.remove_section(exact_name)
+        
+        logging.debug("Saving state file (%s)..." 
+                        % config['state-file'])
         try:
-            os.remove(config_file)
-        except OSError, e:
-            logging.error("Can't remove existing config (%s): %s"
-                % (config_file, e))
+            fp = open(config['state-file']+'-temp', "w")
+        except IOError, e:
+            logging.error("Can't open %s for writing: %s"
+                % (config['state-file']+'-temp', e))
             return 1
-    try:
-        os.rename(config_file+'-temp', config_file)
-    except OSError, e:
-        logging.error("Can't overwrite existing config with new: %s" % e)
-        return 1
-    return 0
+        try:
+            fp.write("# ***WARNING***: This is a file automatically "
+                     "generated by PyTVShows. \n"
+                     "# Do NOT edit unless you absolutely positively know "
+                     "what you're doing.\n\n")
+            state_obj.write(fp)
+        finally:
+            fp.close()
+        if sys.platform[:3] == 'win' or sys.platform[-3:] == 'win':
+            try:
+                os.remove(config['state-file'])
+            except OSError, e:
+                logging.error("Can't remove existing state file (%s): %s"
+                    % (config['state-file'], e))
+                return 1
+        try:
+            os.rename(config['state-file']+'-temp', config['state-file'])
+        except OSError, e:
+            logging.error("Can't overwrite existing state file with new: %s" \
+                            % e)
+            return 1
+        return 0
 
 if __name__ == "__main__":
     sys.exit(main())

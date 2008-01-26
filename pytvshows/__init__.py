@@ -31,7 +31,7 @@ USER_AGENT = "PyTVShows/%s +http://pytvshows.sourceforge.net/" % __version__
 #   seasonepisode special
 
 import bencode
-import pytvshows.logger as logging
+import logger as logging
 
 import datetime
 import feedparser
@@ -51,17 +51,17 @@ import urllib2
 root_logger = logging.getLogger('')
 root_logger.setLevel(logging.DEBUG)
 console = logging.StreamHandler()
-console.setLevel(logging.WARN)
+console.setLevel(logging.INFO)
 formatter = logging.Formatter('%(levelname)-8s: %(message)s')
 console.setFormatter(formatter)
 root_logger.addHandler(console)
 
-
+# library config defaults (script config can be found in scripts/pytvshows)
 config = {
     'feed': "http://tvrss.net/search/index.php?show_name=%s&show_name_exact" \
             "=true&mode=rss",
-    'output_dir': os.path.expanduser("~/"),
-    'output_dir2': None,
+    'output-directory': os.path.expanduser("~/"),
+    'output-directory2': None,
     'quality_matches': {
         "[HD": 1,
         "[DSRIP": 1,
@@ -84,10 +84,13 @@ class Episode(object):
         self.quality = quality
 
     def download(self):
-        if os.path.exists(config['output_dir']):
-            path = os.path.join(config['output_dir'], self.torrent_file())
-        elif config['output_dir2'] and os.path.exists(config['output_dir2']):
-            path = os.path.join(config['output_dir2'], self.torrent_file())
+        if os.path.exists(config['output-directory']):
+            path = os.path.join(config['output-directory'], 
+                                self.torrent_file())
+        elif config['output-directory2'] \
+                and os.path.exists(config['output-directory2']):
+            path = os.path.join(config['output-directory2'],
+                                self.torrent_file())
         else:
             logging.warn("Output directory doesn't exist.")
         logging.info("Downloading %s..." % self.torrent_url)
@@ -109,7 +112,7 @@ class Episode(object):
         try:
             torrent_dict = bencode.bdecode(torrent)
         except bencode.BTFailure:
-            logging.warn("Downloaded file is either corrupted or not a" 
+            logging.warn("Downloaded file is either corrupted or not a " 
                          "torrent, skipping.")
             return False
         if 'announce' not in torrent_dict.keys():
@@ -313,7 +316,6 @@ class Show(object):
                             args['time'], "%Y-%m-%d %H:%M:%S")[0:6]))
         else:
             self.time = None
-        self.ignoremissingdetails = bool(args['ignoremissingdetails'])
         self.rss = None
         self._get_rss_feed()
         self.episodes = None
@@ -489,8 +491,8 @@ class Show(object):
                             if key[0] == 0 and key[1] > last_key:
                                 last_key = key[1]
                         episodes[0, last_key] = [obj]
-                    elif not self.ignoremissingdetails:
-                        logging.warn('Could not match season and/or ' \
+                    else:
+                        logging.info('Could not match season and/or ' \
                             'episode in %s' % episode.description)
                 else:
                     quality = 0
@@ -513,15 +515,14 @@ class Show(object):
                         except KeyError:
                             episodes[season_num, episode_num] = [obj]
                     else:
-                        logging.info('Season or episode number is 0 in %s' \
+                        logging.debug('Season or episode number is 0 in %s' \
                                 % episode.description)
             elif self.show_type == 'date':
                 r = re.compile('Episode\s*Date:\s*([0-9\-]+)$')
                 date_match = r.search(episode.description)
                 if not date_match:
-                    if not self.ignoremissingdetails:
-                        logging.warn('Could not match date in %s' % \
-                            episode.description)
+                    logging.info('Could not match date in %s' % \
+                        episode.description)
                 else:
                     quality = 0
                     for key, value in config["quality_matches"].items():
@@ -544,9 +545,8 @@ class Show(object):
                 r = re.compile('Show\s*Title\s*:\s*(.*?);')
                 title_match = r.search(episode.description)
                 if not title_match:
-                    if not self.ignoremissingdetails:
-                        logging.warn('Could not match title in %s' % \
-                            episode.description)
+                    logging.info('Could not match title in %s' % \
+                                episode.description)
                     title = ""
                 else:
                     title = title_match.group(1)
