@@ -416,34 +416,37 @@ class Show(object):
           'content-length':'1'})
         exc_type = r.get("bozo_exception", Exception()).__class__
         if not r.entries and not r.get('version', ''):
+            msg = None
             if http_status not in [200, 302]: 
-                logging.warn("HTTP error %s: %s" % (http_status, url))
+                msg = "HTTP error %s: %s" % (http_status, url)
             elif http_status == 304:
                 logging.info('Feed not modified since last request')
             elif 'html' in http_headers.get('content-type', 'rss'):
-                logging.warn("Looks like HTML: %s" % url)
+                msg = "Looks like HTML: %s" % url
             elif http_headers.get('content-length', '1') == '0':
-                logging.warn("Empty page: %s" % url)
+                msg = "Empty page: %s" % url
             elif hasattr(socket, 'timeout') and exc_type == socket.timeout:
-                logging.warn("Timed out on %s" % url)
+                msg = "Connection timed out: %s" % url
             elif exc_type == IOError:
-                logging.warn("%s: %s" % (r.bozo_exception, url))
+                msg = "%s: %s" % (r.bozo_exception, url)
             elif hasattr(feedparser, 'zlib') \
                     and exc_type == feedparser.zlib.error:
-                logging.warn("Broken compression: %s" % f.url)
+                msg = "Broken compression: %s" % f.url
             elif exc_type in socket_errors:
-                exc_reason = r.bozo_exception.args[1]
-                logging.warn(exc_reason + f.url)
+                msg = "%s: %s" % (r.bozo_exception.args[1] + f.url)
             elif exc_type == urllib2.URLError:
                 if r.bozo_exception.reason.__class__ in socket_errors:
                     exc_reason = r.bozo_exception.reason.args[1]
                 else:
                     exc_reason = r.bozo_exception.reason
-                logging.warn("%s: %s" % (exc_reason, url))
+                msg = "%s: %s" % (exc_reason, url)
             elif exc_type == KeyboardInterrupt:
                 raise r.bozo_exception
             else:
-                logging.error(r.get("bozo_exception", "can't process") + f.url)
+                msg = "%s: %s" % (r.get("bozo_exception", "can't process"),
+                                  f.url)
+            if msg:
+                logging.warn("Can't download feed: %s" % msg)
             return False
         self.rss = r
         self.etag = r.etag
