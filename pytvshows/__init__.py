@@ -1,8 +1,7 @@
-#!/usr/bin/env python
 # encoding: utf-8
 """
-PyTVShows - Downloads torrents from tvrss.net based on 
-http://tvshows.sourceforge.net/
+PyTVShows - Library
+http://pytvshows.sourceforge.net/
 
 Copyright (C) 2007, Ben Firshman
 
@@ -25,13 +24,16 @@ __version__ = '0.2+svn'
 
 USER_AGENT = "PyTVShows/%s +http://pytvshows.sourceforge.net/" % __version__
 
+import sys
+if not hasattr(sys, "version_info") or sys.version_info < (2,4):
+    raise RuntimeError("PyTVShows requires Python 2.4 or later.")
+
 # TODO:
 # * Support range of episodes (21-22 for example)
-# * Check more than one episode in Show.get_details() in case of 
-#   seasonepisode special
+# * Per-show settings such as quality
 
-import bencode
-import logger as logging
+import pytvshows.bencode as bencode
+import pytvshows.logger as logging
 
 import datetime
 import feedparser
@@ -42,11 +44,11 @@ import sha
 import socket; socket_errors = []
 for e in ['error', 'gaierror']:
     if hasattr(socket, e): socket_errors.append(getattr(socket, e))
-socket.setdefaulttimeout(10) # Stops ridiculously long hangs
-import sys
+socket.setdefaulttimeout(15) # Stops ridiculously long hangs
 import time
 import urllib
 import urllib2
+import urlparse
 
 root_logger = logging.getLogger('')
 root_logger.setLevel(logging.DEBUG)
@@ -73,63 +75,99 @@ config = {
         "[720P": 3,
     },
     'quality': 1,
+    'friendly-filenames': False
 }
 
-class Episode(object):
-    """The parent class for any episode object"""
-    def __init__(self, show, torrent_url, published_time, quality):
-        self.show = show
-        self.torrent_url = torrent_url
-        self.published_time = published_time
-        self.quality = quality
+class TorrentError(Exception): pass
+class TorrentDownloadError(TorrentError): pass
+class TorrentWriteError(TorrentError): pass
+class TorrentTrackerError(TorrentError): pass
+class TorrentNoScrapeError(TorrentError): pass
+class EpisodeError(Exception): pass
+class EpisodeNoWorkingTorrentsError(Exception): pass
+class ShowError(Exception): pass
+class ShowFeedError(ShowError): pass
+class ShowFeedNotModifiedError(ShowFeedError): pass
+class ShowFeedNoEpisodesError(ShowFeedError): pass
+class ShowDetailsError(ShowError): pass
 
+class Torrent(object):
+    """A single torrent file for an episode.
+    
+    Arguments:
+    episode - Episode object that the torrent belongs to
+    url - URL to the torrent
+    quality - Integer quality of episode, as specified in config
+    published_time - Publishing time of torrent as a datetime.datetime object
+    filename - Filename to save torrent to
+    """
+    def __init__(self, episode, url, quality, published_time):
+        self.episode = episode
+        self.url = url
+        self.quality = quality # TODO: pass torrent title here and figure this
+        self.published_time = published_time
+        
+        self.dict = None
+        self.file = None
+        self.tracker_response = None
+        
+        self._server_filename = None
+        
     def download(self):
-        if os.path.exists(config['output-directory']):
-            path = os.path.join(config['output-directory'], 
-                                self.torrent_file())
-        elif config['output-directory2'] \
-                and os.path.exists(config['output-directory2']):
-            path = os.path.join(config['output-directory2'],
-                                self.torrent_file())
-        else:
-            logging.warn("Output directory doesn't exist.")
-        logging.info("Downloading %s..." % self.torrent_url)
-        request = urllib2.Request(self.torrent_url)
+        """Download this torrent and store the bdecoded dictionary and
+        the torrent file in the dict and file attributes respectively.
+        The first successful tracker response is stored in the 
+        tracker_response attribute.
+        
+        Returns the torrent as a bdecoded dictionary.
+        """
+        # TODO: there is no need downloading & checking each time tracker 
+        #       fails split this up into downloading torrent and checking 
+        #       tracker
+        logging.info("Downloading %s..." % self.url)
+        request = urllib2.Request(self.url)
         request.add_header('User-Agent', USER_AGENT)
         try:
             f = urllib2.urlopen(request)
         except urllib2.URLError, e:
             if hasattr(e, "reason"):
-                logging.warn("Could not reach server: %s" % e.reason)
+                raise TorrentDownloadError, "Could not reach server: %s" \
+                                            % e.reason
             elif hasattr(e, "code"):
-                logging.warn(e)
+                raise TorrentDownloadError, e
             else:
-                logging.warn("Unknown error: %s", e)
-            logging.warn("Downloading torrent failed, skipping.")
-            return False
-        torrent = f.read()
+                raise TorrentDownloadError, "Unknown URLError: %s" % e
+        torrent_file = f.read()
+        # This is for use in save()
+        if "content-disposition" in f.headers.dict:
+            r = re.compile('filename="(.+?)"')
+            m = r.search(f.headers.dict["content-disposition"])
+            if m:
+                self._server_filename = m.group(1)
         # Check if torrent is valid
         try:
-            torrent_dict = bencode.bdecode(torrent)
+            torrent_dict = bencode.bdecode(torrent_file)
         except bencode.BTFailure:
-            logging.warn("Downloaded file is either corrupted or not a " 
-                         "torrent, skipping.")
-            return False
+            raise TorrentError, "Downloaded file is either " \
+                                "corrupted or not a torrent"
         if 'announce' not in torrent_dict.keys():
-            logging.warn("Tracker not found in torrent file, skipping.")
-            return False
+            raise TorrentError, "Tracker not found in torrent file"
         logging.debug('Torrent "%s" downloaded, %s bytes' 
-                        % (torrent_dict['info']['name'], len(torrent)))
+                        % (torrent_dict['info']['name'], len(torrent_file)))
         # Check if trackers work
         logging.info("Checking tracker (%s)..." % torrent_dict['announce'])
         chosen_tracker = None
         no_scrape_trackers = []
         # Step 1: Check main tracker, make a note if it doesn't support scrape
-        scrape_url = self._get_scrape_url(torrent_dict['announce'])
-        if scrape_url:
-            if self._check_tracker(scrape_url, torrent_dict, scrape=True):
+        try:
+            scrape_url = self._get_scrape_url(torrent_dict['announce'])
+            try:
+                tracker_response = self._check_tracker(scrape_url,
+                                            torrent_dict, scrape=True)
                 chosen_tracker = torrent_dict['announce']
-        else:
+            except TorrentTrackerError, e:
+                logging.info("Tracker error: %s" % e)
+        except TorrentNoScrapeError:
             logging.debug("Tracker does not support scraping.")
             no_scrape_trackers.append(torrent_dict['announce'])
         # Step 2: Check announce-list trackers, again make a note of no scrape
@@ -141,13 +179,16 @@ class Episode(object):
             else:
                 for url in torrent_dict['announce-list']:
                     logging.info("Checking tracker (%s)..." % url)
-                    scrape_url = self._get_scrape_url(url)
-                    if scrape_url:
-                        if self._check_tracker(scrape_url, torrent_dict, 
-                                scrape=True):
+                    try:
+                        scrape_url = self._get_scrape_url(url)
+                        try:
+                            tracker_response = self._check_tracker(scrape_url, 
+                                                torrent_dict, scrape=True)
                             chosen_tracker = url
                             break
-                    else:
+                        except TorrentTrackerError, e:
+                            logging.info("Tracker error: %s" % e)
+                    except TorrentNoScrapeError:
                         logging.debug("Tracker does not support scraping.")
                         no_scrape_trackers.append(url)
         # Step 3: If these all fail to find a working tracker, use first 
@@ -164,37 +205,91 @@ class Episode(object):
                 chosen_tracker = url
                 break
         if not chosen_tracker:
-            logging.info("No working tracker found, skipping.")
-            return False
-        logging.info("Working tracker found (%s), saving torrent to %s..."
-                        % (chosen_tracker, path))
+            raise TorrentDownloadError, "No working tracker found"
+        logging.debug("Working tracker found (%s)" % chosen_tracker)
+        self.dict = torrent_dict
+        self.file = torrent_file
+        self.tracker_response = tracker_response
+        return torrent_dict
+    
+    def save(self, directory=None, filename=None, retry=3):
+        """Save torrent to path, or output-directory or output-directory2
+        in the configuration if called with no arguments. It is downloaded 
+        if it hasn't been already. Returns path that torrent was saved to.
+        
+        Arguments:
+        Directory - Full directory to save torrent under.
+                    Default: output-directory from config
+        filename - Filename to save torrent as. Default: Automatically
+                   generated from episode details.
+        retry - Number of times to attempt download. Default: 3
+        """
+        if directory:
+            if not os.path.exists(directory):
+                raise TorrentWriteError, "Output directory doesn't exist."
+        else:
+            if os.path.exists(config['output-directory']):
+                directory = config['output-directory']
+            elif config['output-directory2'] \
+                    and os.path.exists(config['output-directory2']):
+                directory = config['output-directory2']
+            else:
+                raise TorrentWriteError, "Output directory doesn't exist."
+        if not self.file:
+            if retry > 1:
+                self.download_retry(retry)
+            else:
+                self.download()
+        if not filename:
+            if not config['friendly-filenames']:
+                if self._server_filename:
+                    filename = self._server_filename
+                else:
+                    parsed_url = urlparse.urlparse(self.url)
+                    if parsed_url[2][-8:] == ".torrent":
+                        try:
+                            filename = urllib2.unquote(
+                                                parsed_url[2].split("/")[-1])
+                        except IndexError:
+                            pass
+            # friendly-filenames and a fallback
+            if not filename:
+                filename = "%s.torrent" % str(self.episode)
+        filename = self._get_valid_filename(filename)
+        path = os.path.join(directory, filename)
+        logging.info("Saving torrent to %s..." % path)
         try:
             f = open(path, "w")
         except IOError, e:
-            logging.warn("Can't open torrent file for writing: %s", e)
-            return False
+            raise TorrentSaveError, "Can't open torrent file for writing: %s"\
+                                        % e
         try:
-            f.write(torrent)
+            f.write(self.file)
         finally:
             f.close()
-        return torrent_dict
+        return path
     
     def download_retry(self, count=3):
-        i=0
-        while i < count:
-            ret = self.download()
-            if ret:
-                return ret
-            logging.info("Torrent download failed, retrying...")
-            i+=1
-        return False
-    
+        """Same as download(), but retries count times upon failure."""
+        i = 1
+        while True:
+            try:
+                return self.download()
+            except TorrentDownloadError, e:
+                if i < count:
+                    logging.info("Download attempt %s of %s failed: %s. "
+                                 "Retrying..." % (i, count, e))
+                    i+=1
+                else:
+                    raise
+
     def _check_tracker(self, url, torrent_dict, scrape=False):
+        """Check tracker. url is an announce URL if scrape is False.
+        
+        Returns tracker response as bedecoded dictionary.
+        """
         if not scrape:
             url = self._get_scrape_url(url)
-            if not url:
-                # Announce URL does not support scrape, give up
-                return False
         info_hash = sha.new(bencode.bencode(torrent_dict['info'])).digest()
         req_url = url+"?"+urllib.urlencode({'info_hash': info_hash}) 
         request = urllib2.Request(req_url)
@@ -203,213 +298,518 @@ class Episode(object):
             f = urllib2.urlopen(request)
         except urllib2.URLError, e:
             if hasattr(e, "reason"):
-                logging.info("Could not reach tracker: %s" % e.reason)
+                raise TorrentTrackerError, "Could not reach tracker: %s" \
+                                            % e.reason
             elif hasattr(e, "code"):
-                logging.info(e)
+                raise TorrentTrackerError, e
             else:
-                logging.info("Unknown error: %s", e)
-            return False
+                raise TorrentTrackerError, "Unknown URLError: %s" % e
         try:
             tracker_response = bencode.bdecode(f.read())
         except bencode.BTFailure:
-            logging.info("Unrecognised tracker response. Torrent may not"
-                         "exist on tracker.")
-            return False
+            raise TorrentTrackerError, "Unrecognised tracker response. " \
+                                       "Torrent may not exist on tracker."
         logging.debug("Valid tracker response: %s" % tracker_response)
         if "files" not in tracker_response.keys() \
                 or not tracker_response["files"]:
-            logging.info("Torrent does not exist on tracker.")
-            return False
+            raise TorrentTrackerError, "Torrent does not exist on tracker."
         return tracker_response
-        
+
     def _get_scrape_url(self, announce_url):
         """Converts an announce URL to a scrape URL."""
         # http://tech.groups.yahoo.com/group/BitTorrent/message/3275
         l = announce_url.split('/')
         if l[-1] != "announce":
-            return False
+            raise TorrentNoScrapeError
         l[-1] = "scrape"
         return "/".join(l)
     
-    def _clean_name(self, name):
-        name = name.replace("/", " ")
-        name = name.replace(":", " ")
-        name = name.replace(".", " ")
-        return name
+    def _get_valid_filename(self, s):
+        """Returns a valid string for using in a filename.
+        Warning: Removes periods (.), so use before adding extension.
+        """
+        s = s.replace(":", "-") # Make our dates pretty
+        return re.sub(r'[^-A-Za-z0-9_\[\]. ]', '', s)
+        
+class _BaseEpisode(object):
+    """The parent class for any episode object. Do not access directly."""
+    def __init__(self, show, key):
+        self.show = show
+        self.key = key
+        self.torrents = []
+    
+    def add_torrent(self, url, quality, published_time):
+        """Creates a new torrent and adds it to this episode.
+        
+        Arguments:
+        url - URL to the torrent
+        quality - Integer quality of episode, as specified in config
+        published_time - Publishing time of torrent as a datetime.datetime
+                         object
+        """
+        torrent = Torrent(
+            episode=self,
+            url=url,
+            quality=quality,
+            published_time=published_time)
+        self.torrents.append(torrent)
+        return torrent
+    
+    def get_torrent(self, quality=None):
+        """Picks a suitable torrent and returns it."""
+        if not quality:
+            quality = config["quality"]
+        # bish, bash, bosh
+        #if len(self.torrents) == 1 and self.torrents[0].quality <= quality:
+        #    return self.torrents[0]
+        # One torrent higher than the quality we want. this is unlikely, but
+        # unwanted.
+        #elif len(self.torrents) == 1:
+        #    raise EpisodeNoWorkingTorrentsError
+        
+        # Find the highest quality available in the feed. This is to avoid
+        # delays trying to find a higher quality torrent if there's really
+        # no chance of finding one.
+        # The only disadvantage to this method is when a higher quality 
+        # episode does actually pop up, we will probably miss the first one.
+        best_quality = 0
+        for torrent in self.torrents:
+            if torrent.quality > best_quality:
+                best_quality = torrent.quality
+        wanted_quality = min(quality, best_quality)
+        shortlist = []
+        # First try : download the episodes for which we have the wanted
+        # quality
+        for torrent in self.torrents:
+            if torrent.quality == wanted_quality:
+                shortlist.append(torrent)
+        # Second try : download the episodes for which the quality delay has
+        # expired, with the best guess for quality
+        if not shortlist:
+            min_published_time = sorted(self.torrents,
+                key=operator.attrgetter("published_time"))[0].published_time
+            d = (datetime.datetime.now() - min_published_time)
+            if (d.days * 86400 + d.seconds) > (6 * 3600 * wanted_quality):
+                # Pick highest quality that isn't larger than the wanted
+                # quality
+                max_quality = 0
+                for torrent in self.torrents:
+                    if torrent.quality > wanted_quality:
+                        continue
+                    if torrent.quality > max_quality:
+                        max_quality = torrent.quality
+                for torrent in self.torrents:
+                    if torrent.quality == max_quality:
+                        shortlist.append(torrent)
+        # Find best torrent out of our shortlist
+        # TODO: check PROPER etc, check seed/leech ratio, etc
+        # but for now...
+        # This produces a list with the latest first
+        shortlist.sort(
+                    key=operator.attrgetter("published_time"), reverse=True)
+        for torrent in shortlist:
+            try:
+                torrent.download_retry()
+                return torrent
+            except TorrentError, e:
+                logging.info("Torrent download failed: %s" % e)
+        raise EpisodeNoWorkingTorrentsError
+    
+    def save(self, quality=None):
+        """Picks a suitable torrent for this episode (get_torrent), 
+        saves it, then returns path saved to."""
+        torrent = self.get_torrent(quality)
+        return torrent.save()
+    
+    def __str__(self):
+        raise NotImplementedError
 
-        
-class EpisodeWithSeasonAndEpisode(Episode):
-    """
-    Represents an episode classified by a season number and an episode 
-    number. For example, "Lost"
-    """
-    def __init__(self, show, torrent_url, published_time, season, episode, 
-                    quality):
-        super(EpisodeWithSeasonAndEpisode, self).__init__(show, torrent_url,
-            published_time, quality)
-        self.season = season
-        self.episode = episode
+class Episode(_BaseEpisode):
+    """Represents an episode that can be classified by no other way other
+    than the date and time that the torrent was published. By definition, 
+    only one torrent is allowed. 
+    Main use in show_type: time
     
-    def torrent_file(self):
-        name = self._clean_name(self.show.human_name)
-        return "%s %02dx%02d.torrent" % (name, self.season, self.episode)
-        
+    Arguments:
+    show - Show object that this episode belongs to
+    torrent_url - URL to the torrent
+    quality - Integer quality of episode, as specified in config
+    published_time - Publishing time of torrent as a datetime.datetime object
+    """
+    def __init__(self, show, torrent_url, quality, published_time):
+        super(Episode, self).__init__(show, published_time)
+        super(Episode, self).add_torrent(torrent_url, quality, published_time)
+
     def __str__(self):
-        return "%s: Season %s, Episode %s, Quality %s" % \
-                    (self.show, self.season, self.episode, self.quality)
-class EpisodeWithDate(Episode):
-    """
-    Represents an episode classified by a date.
-    For example, "The Daily Show"
-    """
-    def __init__(self, show, torrent_url, published_time, date, quality):
-        super(EpisodeWithDate, self).__init__(show, torrent_url, 
-            published_time, quality)
-        self.date = date
+        return "%s %s" % (self.show, self.key)
     
-    def torrent_file(self):
-        name = self._clean_name(self.show.human_name)
-        return "%s %s.torrent" % (name, self.date)
-        
+    def add_torrent(self, url, quality, published_time):
+        raise NotImplementedError, "An Episode object can only have one " \
+                                   "torrent."
+
+class EpisodeWithSeasonAndEpisode(_BaseEpisode):
+    """Represents an episode classified by a season number and an episode 
+    number.
+    Main use in show_type: seasonepisode
+    For example, "Lost".
+    
+    Arguments:
+    show - Show object that this episode belongs to
+    key - (season, episode) tuple
+    """ 
     def __str__(self):
-        return "%s: %s, Quality %s" % \
-                (self.show, self.date, self.quality)
+        return "%s %02dx%02d" % (self.show, self.key[0], self.key[1])
+
+class EpisodeWithDate(_BaseEpisode):
+    """Represents an episode classified by a date.
+    Main use in show_type: date. Also used for specials.
+    For example, "The Daily Show".
+    
+    Arguments:
+    show - Show object that this episode belongs to
+    key - Date of show's airing as a date object
+    """
+    def __str__(self):
+        return "%s %s" % (self.show, self.key)
     
 class EpisodeWithTitle(Episode):
+    """Represents an episode with a title to identify it. It is an extension
+    of Episode, so only one torrent is allowed. The only difference is the 
+    title attribute, which should be unique within a show.
+    Main use in show_type: title
+    For example "Discovery Channel".
+    
+    Arguments:
+    show - Show object that this episode belongs to
+    title - The title of this episode
+    torrent_url - URL to the torrent
+    quality - Integer quality of episode, as specified in config
+    published_time - Publishing time of torrent as a datetime.datetime object
     """
-    Represents an episode with no classification.
-    For example "Discovery Channel"
-    """
-    def __init__(self, show, torrent_url, published_time, title, quality):
-        super(EpisodeWithTitle, self).__init__(show, torrent_url, 
-            published_time, quality)
+    def __init__(self, show, title, torrent_url, quality, published_time):
+        super(EpisodeWithTitle, self).__init__(show, torrent_url, quality, 
+                                      published_time)
         self.title = title
-        
-    def torrent_file(self):
-        name = self._clean_name(self.show.human_name)
-        title = self._clean_name(self.title)
-        return "%s %s.torrent" % (name, title)
     
     def __str__(self):
-        return "%s: %s, Quality %s" % \
-                (self.show, self.title, self.quality)
-        
+        return "%s - %s" % (self.show, self.title)
+
+
 class Show(object):
-    """Represents a show. For example, "Friends"."""
-    def __init__(self, exact_name, args):
-        super(Show, self).__init__()
-        self.exact_name = exact_name
-        self.human_name = args['human_name']
-        self.show_type = args['show_type']
-        self.season = args['season']
-        self.episode = args['episode']
-        self.etag = args.get('etag', None)
-        self.last_modified = args.get('last_modified', None)
-        #YYYY-MM-DD HH:MM:SS
-        if args['date']:
-            self.date = datetime.datetime(*(time.strptime(
-                            args['date'], "%Y-%m-%d")[0:6])).date()
-        else:
-            self.date = None
-        if args['time']:
-            self.time = datetime.datetime(*(time.strptime(
-                            args['time'], "%Y-%m-%d %H:%M:%S")[0:6]))
-        else:
-            self.time = None
-        self.rss = None
-        self._get_rss_feed()
-        self.episodes = None
-        if not self.show_type or not self.human_name  \
-                or (self.show_type == "date" and not self.date) \
-                or (self.show_type == "time" and not self.time) \
-                or (self.show_type == "seasonepisode" \
-                    and (not self.season or not self.episode)):
-            self.get_details()
-        else:
-            # this needs to be done half way through get_details
-            self._parse_rss_feed()
-        if self.season:
-            self.season = int(self.season)
-        if self.season:
-            self.episode = int(self.episode)
+    """Represents a show. For example, "Friends".
     
-    def get_details(self):
-        """Tries to get the details for the show from the RSS feed. This 
-        should only be run once if the configs are all working OK."""
-        logging.info("Getting details for %s..." % self)
-        if not self.rss:
-            return False
-        try:
-            episode = self.rss['entries'][0]
-        except IndexError:
-            logging.warn("There are no episodes in the RSS feed for %s." % \
-                self)
-            return False
-        # Determine human title
-        r = re.compile('Show Name\s*: (.*?);')
-        name_match = r.search(episode.description)
-        if not name_match:
-            logging.warn("Could not determine show name for %s." % self)
-            return False
-        self.human_name = name_match.group(1)
-        # Determine show type
-        r = re.compile('Show\s*Title\s*:\s*(.*?);')
-        title_match = r.search(episode.description)
-        r = re.compile('Season\s*:\s*([0-9]*?);')
-        season_match = r.search(episode.description)
-        r = re.compile('Episode\s*:\s*([0-9]*?)$')
-        episode_match = r.search(episode.description)
-        r = re.compile('Episode\s*Date:\s*([0-9\-]+)$')
-        date_match = r.search(episode.description)
-        if season_match and episode_match:
-            self.show_type = 'seasonepisode'
-        elif date_match:
-            self.show_type = 'date'
-        elif titlematch and titlematch.group(1) != 'n/a':
-            self.show_type = 'time'
-        else:
-            logging.warn("Could not determine show type for %s." % self)
-            return False
-        # Determine highest key
-        self._parse_rss_feed()
-        if not self.episodes:
-            return False
-        max_key = max(self.episodes.keys())
-        if not max_key:
-            logging.warn("Could not determine last episode for %s." % self)
-            return False
-        if self.show_type == 'seasonepisode' \
-                and (not self.season or not self.episode):
-            (self.season, self.episode) = max_key
-            # So we can keep track of specials
-            # TODO: need a better way to do this, this is a quick hack. 
-            # If there is a special after the latest normal episode, it will
-            # download it and we don't want that
-            self.time = self.episodes[max_key][0].published_time
-        elif self.show_type == 'date' and not self.date:
-            self.date = max_key
-        elif self.show_type == 'time' and not self.time:
-            self.time = max_key
+    Arguments:
+    exact_name - Name of show in tvRSS.net URL
+    Optional (fetched from tvRSS.net if not specified):
+    human_name - A human friendly name for the show
+    show_type - seasonepisode, date, title or time
+    last_key - Last key for episode downloaded. Type depends on show_type:
+                    seasonepisode: (season, episode) tuple
+                    date: datetime.date object
+                    title: Last title as a string
+                    time: datetime.datetime object with 6 arguments
+               If a string is supplied, it will be converted to an object
+               based on the value of show_type.
+    last_special - The publishing date of the last special downloaded as a 
+                   datetime.date object. If a string is supplied, it will be 
+                   converted. Only applies for show_types seasonepisode, 
+                   date and title. A special is an episode that does not
+                   fit in to the show_type.
+    feed_etag - The last etag receieved from the feed server.
+    feed_last_modified - The last last_modified response from the feed server
+                         as a datetime.datetime object with 6 arguments. If a
+                         string is supplied, it will be converted.
+    """
+    def __init__(self, exact_name, human_name=None, show_type=None, 
+                 last_key=None, last_special=None, feed_etag=None, 
+                 feed_last_modified=None):
+        self.exact_name = exact_name
+        self.human_name = human_name
+        self.show_type = show_type
+        self.last_key = last_key
+        if isinstance(self.last_key, str):
+            logging.debug("last_key is a string, converting...")
+            if self.show_type == "seasonepisode":
+                # convert string to tuple
+                self.last_key = \
+                    tuple(int(s) for s in self.last_key[1:-1].split(","))
+            elif self.show_type == "date":
+                # YYYY-MM-DD
+                self.last_key = datetime.datetime(*(time.strptime(
+                                    self.last_key, "%Y-%m-%d")[0:6])).date()
+            elif self.show_type == "time" or self.show_type == "title":
+                # YYYY-MM-DD HH:MM:SS
+                self.last_key = datetime.datetime(*(time.strptime(
+                                    self.last_key, "%Y-%m-%d %H:%M:%S")[0:6]))
+        if self.show_type and self.last_key:
+            assert (self.show_type == "seasonepisode"
+                    and isinstance(self.last_key[0], int) 
+                    and isinstance(self.last_key[1], int)) \
+                or (self.show_type == "date" 
+                    and isinstance(self.last_key, datetime.date)) \
+                or (self.show_type == "title"
+                    and isinstance(self.last_key, datetime.datetime)) \
+                or (self.show_type == "time"
+                    and isinstance(self.last_key, datetime.datetime)), \
+            "last_key does not correspond to show_type: %s" % last_key
+        self.last_special = last_special
+        if isinstance(self.last_special, str):
+            self.last_special = datetime.datetime(*(time.strptime(
+                                self.last_special, "%Y-%m-%d")[0:6])).date()
+        if self.last_special:
+            assert isinstance(self.last_special,
+                datetime.date), "last_special is not a datetime.date object"
+        self.feed_etag = feed_etag
+        self.feed_last_modified = feed_last_modified
+        if isinstance(self.feed_last_modified, str):
+            self.feed_last_modified = datetime.datetime(*(time.strptime(
+                        self.feed_last_modified, "%Y-%m-%d %H:%M:%S")[0:6]))
+        if self.feed_last_modified:
+            assert isinstance(self.feed_last_modified,
+                datetime.datetime), "feed_last_modified is not a " \
+                "datetime.datetime object"
+        self.rss = None
+        self.episodes = {}
+        self.specials = {} # FIXME QUICK!!!: actually download these
+
+    def save_new_episodes(self):
+        """Saves new episodes and sets and returns the new last_key."""
+        new_episodes = self.get_new_episodes()
+        keys = sorted(new_episodes.keys())
+        for key in keys:
+            # This here generates a list from our configured quality to
+            # the lowest available
+            l = range(min(config["quality_matches"].values()), 
+                config["quality"] + 1)
+            l.reverse()
+            for quality in l:
+                try:
+                    new_episodes[key].save(quality)
+                    self.last_key = key
+                    break
+                except EpisodeNoWorkingTorrentsError:
+                    if len(new_episodes[key].torrents) == 1:
+                        break
+                    logging.info("No torrents working for this quality (%s), "
+                                 "trying one lower..." % quality)
+            if self.last_key != key:
+                if key == keys[-1]:
+                    # TODO: only warn about this once otherwise cron jobs
+                    #       will get oh-so-annoying
+                    logging.warn("No working torrents found for %s. The "
+                                 "download will be attempted again next "
+                                 "time PyTVShows is run." 
+                                % new_episodes[key])
+                else:
+                    # TODO: store failed torrents in the state file for
+                    #       retrying
+                    logging.warn("No working torrents found for %s. You "
+                                 "may want to download it manually." 
+                                 % new_episodes[key])
+        return self.last_key
 
     def get_new_episodes(self):
-        """Gets new episodes for the show and updates the key based on what
-        show type it is."""
-        if self.show_type == 'seasonepisode':
-            (self.season, self.episode) = self._get_new_episodes_with_key(
-                (self.season, self.episode))
-        elif self.show_type == 'date':
-            self.date = self._get_new_episodes_with_key(self.date)
-        elif self.show_type == 'time':
-            self.time = self._get_new_episode_with_key(self.time)
+        """Returns dictionary of new episodes (ie, where key > last_key).
+        Runs get_episodes() if it hasn't been already."""
+        if not self.episodes:
+            self.get_episodes()
+        new_episodes = {}
+        for key, episode in self.episodes.items():
+            if key > self.last_key:
+                new_episodes[key] = episode
+        return new_episodes
+
+    def get_episodes(self):
+        """Downloads episode information and returns dictionary of episode 
+        objects, also stored in the episodes attribute. Updates last_key
+        and last_special. Specials are also stored in the attribute 
+        specials. Runs get_details() if not details have been provided and 
+        it hasn't been run already."""
+        if not self.rss:
+            self._get_rss_feed()
+        if not self.rss['entries']:
+            raise ShowFeedNoEpisodesError
+        if not self.show_type:
+            self.get_details()
+        episodes = {}
+        last_key = None
+        last_special = None
+        for episode in self.rss['entries']:
+            if self.show_type == 'seasonepisode':
+                r = re.compile('Season\s*: ([0-9]*?);')
+                se_match = r.search(episode.description)
+                r = re.compile('Episode\s*:\ ([0-9]*?)$')
+                ep_match = r.search(episode.description)
+                if se_match and ep_match:
+                    se = (int(se_match.group(1)), int(ep_match.group(1)))
+                    if se not in self.episodes:
+                        self.episodes[se] = \
+                            EpisodeWithSeasonAndEpisode(self, se)
+                    self.episodes[se].add_torrent(
+                        url = episode.link,
+                        quality = self._get_quality(episode.title),
+                        published_time = 
+                            datetime.datetime(*episode.updated_parsed[:6]))
+                    if not last_key or se > last_key:
+                        last_key = se
+                else:
+                    date = self._add_special(episode)
+                    if not last_special or date > last_special:
+                        last_special = date
+            elif self.show_type == 'date':
+                r = re.compile('Episode\s*Date:\s*([0-9\-]+)$')
+                date_match = r.search(episode.description)
+                if date_match:
+                    date = datetime.datetime(*(time.strptime(
+                        date_match.group(1), "%Y-%m-%d")[0:6])).date()
+                    if date not in self.episodes:
+                        self.episodes[date] = EpisodeWithDate(self, date)
+                    self.episodes[date].add_torrent(
+                        url = episode.link,
+                        quality = self._get_quality(episode.title),
+                        published_time = 
+                            datetime.datetime(*episode.updated_parsed[:6]))
+                    if not last_key or date > last_key:
+                        last_key = date
+                else:
+                    # er, different date. don't get confused ok?
+                    date = self._add_special(episode)
+                    if not last_special or date > last_special:
+                        last_special = date
+            elif self.show_type == "title":
+                r = re.compile('Show\s*Title\s*:\s*(.*?);')
+                title_match = r.search(episode.description)
+                if title_match and "n/a" not in title_match.group(1).lower():
+                    title = title_match.group(1)
+                    # This is our key for a title type funnily enough.
+                    # We can't use the title as the key because they can't
+                    # be compared.
+                    published_time \
+                            = datetime.datetime(* episode.updated_parsed[:6])
+                    # BUT! the title needs to be unique too
+                    titles = [ep.title for ep in self.episodes.values()]
+                    # Thusforth: the wacky title type
+                    if published_time not in self.episodes \
+                            and title not in titles:
+                        self.episodes[published_time] = EpisodeWithTitle(
+                            show = self,
+                            title = title,
+                            torrent_url = episode.link,
+                            quality = self._get_quality(episode.title), 
+                            published_time = published_time)
+                    if not last_key or published_time > last_key:
+                        last_key = published_time
+                else:
+                    date = self._add_special(episode)
+                    if not last_special or date > last_special:
+                        last_special = date
+            elif self.show_type == "time":
+                published_time \
+                        = datetime.datetime(* episode.updated_parsed[:6])
+                # Just forget it if two torrents have exactly the same time
+                if published_time not in self.episodes:
+                    self.episodes[published_time] = Episode(
+                        show = self,
+                        torrent_url = episode.link,
+                        quality = self._get_quality(episode.title), 
+                        published_time = published_time)
+                    if not last_key or published_time > last_key:
+                        last_key = published_time
+                # No specials for time
+            else:
+                # We really shouldn't get here
+                raise ShowError, "Unrecognised show_type"
+        if not self.last_key:
+            self.last_key = last_key
+        if not self.last_special:
+            self.last_special = last_special
+        return self.episodes
+        
+    def get_details(self):
+        """If details are missing, fetches the human_name and show_type
+        from the RSS feed. Returns dictionary with keys huma_name and 
+        show_type."""
+        if not self.rss:
+            self._get_rss_feed()
+        logging.info("Getting details for %s..." % self)
+        if not self.rss['entries']:
+            raise ShowFeedNoEpisodesError
+        # Determine human title. We are assuming here that the first episode
+        # in the feed has a useful description. This may cause problems
+        r = re.compile('Show Name\s*: (.*?);')
+        name_match = r.search(self.rss['entries'][0].description)
+        if not name_match:
+            raise ShowDetailsError, "Could not determine show name for %s." \
+                                        % self
+        human_name = name_match.group(1)
+        # Determine show type
+        title_re = re.compile('Show\s*Title\s*:\s*(.*?);')
+        season_re = re.compile('Season\s*:\s*([0-9]*?);')
+        episode_re = re.compile('Episode\s*:\s*([0-9]*?)$')
+        date_re = re.compile('Episode\s*Date:\s*([0-9\-]+)$')
+        d = {
+            'seasonepisode': 0,
+            'date': 0,
+            'title': 0
+        }
+        for episode in self.rss['entries']:
+            title_match = title_re.search(episode.description)
+            season_match = season_re.search(episode.description)
+            episode_match = episode_re.search(episode.description)
+            date_match = date_re.search(episode.description)
+            if season_match and episode_match:
+                d['seasonepisode'] += 1
+            elif date_match:
+                d['date'] += 1
+            elif title_match and title_match.group(1) != 'n/a':
+                d['title'] += 1
+        # Nothing could be found, fall back to "time" type
+        if d.values() == [0, 0, 0]:
+            show_type = "time"
+        else:
+            # Sort keys based on values
+            e = d.keys()
+            e.sort(cmp=lambda a,b: cmp(d[a], d[b]))
+            show_type = e[-1]
+        self.human_name = human_name
+        self.show_type = show_type
+        return {'show_type': show_type, 'human_name': human_name}
     
-    def _get_rss_feed(self):
-        """Gets the feedparser object."""
-        url = config['feed'] % self.exact_name
+    def _get_quality(self, s):
+        """Given title string, returns quality integer."""
+        for key, value in config["quality_matches"].items():
+            if key in s:
+                return value
+        return 0
+    
+    def _add_special(self, episode):
+        """Adds a special episode from feed entry. Returns date of special."""
+        date = datetime.datetime(*episode.updated_parsed[:6]).date()
+        if date not in self.specials:
+            self.specials[date] = EpisodeWithDate(self, date)
+        self.specials[date].add_torrent(
+            url = episode.link,
+            quality = self._get_quality(episode.title),
+            published_time = 
+                datetime.datetime(*episode.updated_parsed[:6]))
+        return date
+    
+    def _get_rss_feed(self, url=None):
+        """Returns the feedparser object and stores it in the rss attribute.
+        
+        Arguments:
+        url - Feed URL to download. Default: "feed" in config.
+        """
+        if not url:
+            url = config['feed'] % self.exact_name
         logging.info("Downloading and processing %s..." % url)
+        last_modified = None
+        if self.feed_last_modified:
+            last_modified = self.feed_last_modified.timetuple()
         r = feedparser.parse(
             url,
-            etag = self.etag,
-            modified = self.last_modified,)
+            etag = self.feed_etag,
+            modified = last_modified,)
             #agent = USER_AGENT,) # FIXME: only one entry is downloaded with 
                                   # this for some reason
         http_status = r.get('status', 200)
@@ -420,230 +820,44 @@ class Show(object):
         if not r.entries and not r.get('version', ''):
             msg = None
             if http_status not in [200, 302]: 
-                msg = "HTTP error %s: %s" % (http_status, url)
+                raise ShowFeedError, "HTTP error %s: %s" % (http_status, url)
             elif http_status == 304:
-                logging.info('Feed not modified since last request')
+                raise ShowFeedNotModifiedError
             elif 'html' in http_headers.get('content-type', 'rss'):
-                msg = "Looks like HTML: %s" % url
+                raise ShowFeedError, "Looks like HTML: %s" % url
             elif http_headers.get('content-length', '1') == '0':
-                msg = "Empty page: %s" % url
+                raise ShowFeedError, "Empty page: %s" % url
             elif hasattr(socket, 'timeout') and exc_type == socket.timeout:
-                msg = "Connection timed out: %s" % url
+                raise ShowFeedError, "Connection timed out: %s" % url
             elif exc_type == IOError:
-                msg = "%s: %s" % (r.bozo_exception, url)
+                raise ShowFeedError, "%s: %s" % (r.bozo_exception, url)
             elif hasattr(feedparser, 'zlib') \
                     and exc_type == feedparser.zlib.error:
-                msg = "Broken compression: %s" % f.url
+                raise ShowFeedError, "Broken compression: %s" % f.url
             elif exc_type in socket_errors:
-                msg = "%s: %s" % (r.bozo_exception.args[1] + f.url)
+                raise ShowFeedError, "%s: %s" \
+                                     % (r.bozo_exception.args[1] + f.url)
             elif exc_type == urllib2.URLError:
                 if r.bozo_exception.reason.__class__ in socket_errors:
                     exc_reason = r.bozo_exception.reason.args[1]
                 else:
                     exc_reason = r.bozo_exception.reason
-                msg = "%s: %s" % (exc_reason, url)
+                raise ShowFeedError, "%s: %s" % (exc_reason, url)
             elif exc_type == KeyboardInterrupt:
                 raise r.bozo_exception
             else:
-                msg = "%s: %s" % (r.get("bozo_exception", "can't process"),
-                                  f.url)
-            if msg:
-                logging.warn("Can't download feed: %s" % msg)
-            return False
+                raise ShowFeedError, "%s: %s" \
+                    % (r.get("bozo_exception", "can't process"), f.url)
         self.rss = r
-        self.etag = r.etag
-        self.last_modified = r.get('modified', None)
+        self.feed_etag = r.etag
+        if hasattr(r, "modified"):
+            self.feed_last_modified = datetime.datetime(* r.modified[:6])
+        else:
+            self.feed_last_modified = None
         return r
-    
-    def _parse_rss_feed(self):
-        if not self.rss:
-            return False
-        episodes = {}
-        for episode in self.rss['entries']:
-            if self.show_type == 'seasonepisode':
-                r = re.compile('Season\s*: ([0-9]*?);')
-                season_match = r.search(episode.description)
-                r = re.compile('Episode\s*:\ ([0-9]*?)$')
-                episode_match = r.search(episode.description)
-                if not season_match or not episode_match:
-                    # This might be a special with a title
-                    r = re.compile('Show\s*Title\s*:\s*(.*?);')
-                    title_match = r.search(episode.description)
-                    if title_match and title_match.group(1) != 'n/a' \
-                                        and title_match.group(1) != '':
-                        title = title_match.group(1)
-                        logging.info("Found episode with title %s and no " \
-                            "season or episode in seasonepisode show." % title)
-                        quality = 0
-                        for key, value in config["quality_matches"].items():
-                            if key in episode.title:
-                                quality = value
-                                break
-                        date = datetime.datetime(* episode.updated_parsed[:6])
-                        obj = EpisodeWithTitle(
-                            self,
-                            episode.link,
-                            date,
-                            title,
-                            quality)
-                        last_key = 0
-                        for key in episodes.keys():
-                            if key[0] == 0 and key[1] > last_key:
-                                last_key = key[1]
-                        episodes[0, last_key] = [obj]
-                    else:
-                        logging.info('Could not match season and/or ' \
-                            'episode in %s' % episode.description)
-                else:
-                    quality = 0
-                    for key, value in config["quality_matches"].items():
-                        if key in episode.title:
-                            quality = value
-                            break
-                    season_num = int(season_match.group(1))
-                    episode_num = int(episode_match.group(1))
-                    if season_num != 0 and episode_num != 0:
-                        obj = EpisodeWithSeasonAndEpisode(
-                            self,
-                            episode.link,
-                            datetime.datetime(* episode.updated_parsed[:6]),
-                            season_num,
-                            episode_num,
-                            quality)
-                        try:
-                            episodes[season_num, episode_num].append(obj)
-                        except KeyError:
-                            episodes[season_num, episode_num] = [obj]
-                    else:
-                        logging.debug('Season or episode number is 0 in %s' \
-                                % episode.description)
-            elif self.show_type == 'date':
-                r = re.compile('Episode\s*Date:\s*([0-9\-]+)$')
-                date_match = r.search(episode.description)
-                if not date_match:
-                    logging.info('Could not match date in %s' % \
-                        episode.description)
-                else:
-                    quality = 0
-                    for key, value in config["quality_matches"].items():
-                        if key in episode.title:
-                            quality = value
-                            break
-                    date = datetime.datetime(*(time.strptime(
-                        date_match.group(1), "%Y-%m-%d")[0:6])).date()
-                    obj = EpisodeWithDate(
-                        self,
-                        episode.link,
-                        datetime.datetime(* episode.updated_parsed[:6]),
-                        date,
-                        quality)
-                    try:
-                        episodes[date].append(obj)
-                    except KeyError:
-                        episodes[date] = [obj]
-            elif self.show_type == 'time':
-                r = re.compile('Show\s*Title\s*:\s*(.*?);')
-                title_match = r.search(episode.description)
-                if not title_match:
-                    logging.info('Could not match title in %s' % \
-                                episode.description)
-                    title = ""
-                else:
-                    title = title_match.group(1)
-                quality = 0
-                for key, value in config["quality_matches"].items():
-                    if key in episode.title:
-                        quality = value
-                        break
-                date = datetime.datetime(* episode.updated_parsed[:6])
-                obj = EpisodeWithTitle(
-                    self,
-                    episode.link,
-                    date,
-                    title,
-                    quality)
-                try:
-                    episodes[date].append(obj)
-                except KeyError:
-                    episodes[date] = [obj]
-        self.episodes = episodes
-        return episodes
-
-    def _get_new_episodes_with_key(self, min_key):
-        downloaded_episode_keys = []
-        if not self.episodes:
-            return min_key
-        episodes = self.episodes # so we can fuck with it
-        # What's the best quality available for the last 7 episodes?
-        best_quality = 0
-        i = 0
-        done = False
-        for ep_set in episodes.values():
-            for ep in ep_set:
-                if ep.quality > best_quality:
-                    best_quality = ep.quality
-                i += 1
-        wanted_quality = min(config["quality"], best_quality)
-        # Only get unseen episodes
-        # Check seasonepisode specials
-        last_time = None
-        if self.show_type == 'seasonepisode' and (0, 0) in episodes.keys():
-            last_time = None
-            for key in episodes.keys():
-                if key[0] == 0:
-                    if last_time is None \
-                            or episodes[key][0].published_time > last_time:
-                        last_time = episodes[key][0].published_time
-                    if self.time \
-                            and episodes[key][0].published_time <= self.time:
-                        del episodes[key]
-            if last_time:
-                self.time = last_time
-        # Check normal episodes
-        for key in episodes.keys():
-            if (self.show_type != 'seasonepisode' or key[0] != 0) \
-                    and key <= min_key:
-                del episodes[key]
-        # First try : download the episodes for which we have the wanted
-        # quality
-        for key, ep_set in episodes.items():
-            for ep in ep_set:
-                if ep.quality == wanted_quality:
-                    logging.info("Downloading %s..." % ep)
-                    if ep.download_retry():
-                        downloaded_episode_keys.append(key)
-                        break
-        # Second try : download the episodes for which the quality delay has
-        # expired, with the best guess for quality
-        for key, ep_set in episodes.items():
-            if key not in downloaded_episode_keys:
-                ep_set.sort(key=operator.attrgetter("published_time"))
-                min_published_time = ep_set[0].published_time
-                d = (datetime.datetime.now() - min_published_time)
-                if (d.days*86400 + d.seconds) > 6*3600*wanted_quality:
-                    # Try to match wanted quality
-                    ep_set.sort(key=operator.attrgetter("quality"))
-                    episode = None
-                    for ep in ep_set:
-                        if ep.quality > wanted_quality and (not episode 
-                                or ep.quality > episode.quality):
-                            episode = ep
-                    if not episode:
-                        episode = ep_set[0]
-                    logging.info("Downloading %s..." % episode)
-                    if episode.download_retry():
-                        downloaded_episode_keys.append(key)
-        if len(downloaded_episode_keys) > 0:
-            downloaded_episode_keys.sort()
-            if self.show_type == 'seasonepisode' \
-                    and downloaded_episode_keys[-1:][0][0] == 0:
-                return min_key
-            return downloaded_episode_keys[-1:][0]
-        return min_key
     
     def __str__(self):
         if self.human_name:
             return self.human_name
         else:
             return self.exact_name
-

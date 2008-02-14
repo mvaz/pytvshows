@@ -1,7 +1,9 @@
 PyTVShows
 =========
 
-pytvshows downloads torrents for TV shows from RSS feeds provided by tvRSS.net. It is designed to be run from cron or a shell for programs like rTorrent. It is based on TVShows (http://tvshows.sourceforge.net/).
+pytvshows downloads torrents for TV shows from RSS feeds provided by 
+tvRSS.net. It is designed to be run from cron or a shell for programs like 
+rTorrent. It is based on TVShows (http://tvshows.sourceforge.net/).
 
 Installation
 ------------
@@ -18,54 +20,25 @@ $ pytvshows --help
 Configuration
 -------------
 
-By default, the configuration is saved at ~/.pytvshows.cfg
+By default, the configuration is saved at "~/.pytvshows/config". Unless you 
+have configured the state file to be stored elsewhere, make sure you create
+this directory and it is writable.
 
-This file is used to tell pytvshows what shows to download. It consists of 
-headings of the exact tvrss.net names, and a series of parameters. The exact 
-name is the name in the tvrss.net URL when viewing the episodes of a show.
+The configuration file is used to tell pytvshows what shows to download and
+stores general configuration options. It consists of headings of the exact
+tvrss.net names, as well as the "pytvshows" heading to store general options. 
+The exact name is the name in the tvrss.net URL when viewing the episodes of a 
+show.
 For example:
 
+[pytvshows]
+log=~/.pytvshows/pytvshows.log
+output-directory=~/torrents
 [Heroes]
-human_name = Heroes
-episode = 23
-season = 1
-show_type = seasonepisode
-
 [Without+a+Trace]
-
 [Lost]
-episode = 19
-season = 3
 
-PyTVShows writes data to this configuration file, so be sure it will not run 
-you are editing. Ideally adding/removing shows would be done atomically by the 
-program itself, but this is not a feature yet.
-
-Heroes has already been processed by PyTVShows, that is why it has extra 
-parameters. To stop downloading episodes for this show, simply remove it
-from the configuration.
-
-Without a Trace has been added by a user with no parameters, so the current 
-season/episode will be determined and no episodes will be downloaded. New 
-episodes will be downloaded thereafter.
-
-Lost has been added by a user with an episode and season specified. Every 
-episode after this will be downloaded (non-inclusive). If you want to download
-an entire season, set the episode to 0.
-
-A full list of parameters:
-* show_type: Determines the type of show. seasonepisode, date or time.
-* season: The season of the last episode downloaded (show_type: seasonepisode)
-* episode: The last episode downloaded from season (show_type: seasonepisode)
-* date: Date of last episode downloaded. (show_type: date)
-* time: Time of last episode downloaded. (show_type: time)
-* human_name: Name used for torrent file. Fetched automatically, should not
-              need editing.
-
-If uses a date instead of season/episode, the show_type date is used. If none
-of these are specified, it falls back to time where the release time of the 
-torrent is used. These are both experimental, I haven't had the time to test 
-them properly. Feedback would be appreciated.
+The general options use the same names as the long command line options.
 
 Here is a sample cron job that will run every half hour:
 

@@ -21,10 +21,10 @@ along with this program; if not, write to the Free Software
 Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 """
 
-__version__ = '0.2+svn'
-
 import pytvshows
 import pytvshows.logger as logging
+
+__version__ = pytvshows.__version__
 
 import ConfigParser
 import getopt
@@ -57,9 +57,11 @@ Options:
                     sensible level for cron jobs (WARN).
   
 Configuration options (overrides values in config file):
-  -f FEED, --feed=FEED
+  -F FEED, --feed=FEED
                     Override the tvrss.net feed. %%s is replaced with the 
                     exact show name.
+  -f yes/no, --friendly-filenames=yes/no
+                    Set to yes to use user friendly filenames.
   -i MINS, --interval=MINS
                     If running as a daemon, interval to check feeds. Default
                     and minimum: 30
@@ -110,8 +112,9 @@ def main(argv=None):
     try:
         try:
             opts, args = getopt.gnu_getopt(argv[1:], 
-                "c:df:hi:l:o:O:p:qs:Q:vx:", 
-                ["config=", "daemon", "feed=", "help", "interval=", "log=", 
+                "c:df:F:hi:l:o:O:p:qs:Q:vx:", 
+                ["config=", "daemon", "feed=", "friendly-filenames=", "help", 
+                 "interval=", "log=", 
                  "output-directory=", "output-directory2=", "pid-file=", 
                  "quality=", "quiet", "socket-file=", "state-file=", 
                  "verbose"])
@@ -134,8 +137,10 @@ def main(argv=None):
             elif option in ("-q", "--quiet"):
                 pytvshows.console.increaseLevel()
             # config overrides. error checking is done below
-            elif option in ("-f", "--feed"):
+            elif option in ("-F", "--feed"):
                 config_override['feed'] = value
+            elif option in ("-f", "--friendly-filenames"):
+                config_override['friendly-filenames'] = value
             elif option in ("-i", "--interval"):
                 config_override['interval'] = value
             elif option in ("-l", "--log"):
@@ -200,6 +205,14 @@ def main(argv=None):
                 except TypeError:
                     logging.error("Specified feed does not include %s.")
                     return 1
+            elif key == "friendly-filenames":
+                if config[key].lower() == "yes" \
+                        or config[key] == "1" \
+                        or config[key].lower() == "true" \
+                        or config[key].lower() == "aye":
+                    config[key] == True
+                else:
+                    config[key] == False
             elif key == "interval":
                 config[key] = int(config[key])
                 if config[key] < 30:
@@ -255,12 +268,10 @@ def main(argv=None):
             args = {
                 'human_name': None,
                 'show_type': None,
-                'season': None,
-                'episode': None,
-                'date': None,
-                'time': None,
-                'etag': None,
-                'last_modified': None,
+                'last_key': None,
+                'last_special': None,
+                'feed_etag': None,
+                'feed_last_modified': None,
             }
             if not state_obj.has_section(exact_name):
                 state_obj.add_section(exact_name)
@@ -268,8 +279,17 @@ def main(argv=None):
                 if state_obj.has_option(exact_name, key):
                     args[key] = state_obj.get(exact_name, key)
             logging.info("Getting episodes for %s..." % exact_name)
-            show = pytvshows.Show(exact_name, args)
-            show.get_new_episodes()
+            show = pytvshows.Show(exact_name, **args)
+            try:
+                show.save_new_episodes()
+            except pytvshows.ShowFeedNotModifiedError:
+                logging.info("Feed hasn't changed since last check.")
+            except pytvshows.ShowFeedNoEpisodesError:
+                logging.warn("Could not find any episodes for %s." % show)
+            except pytvshows.ShowDetailsError, e:
+                logging.warn("Error fetching details for %s: %s" % (show, e))
+            except pytvshows.ShowFeedError, e:
+                logging.warn("Error fetching feed for %s: %s" % (show, e))
             for (key, value) in args.items():
                 if getattr(show, key) != value:
                     state_obj.set(exact_name, key, getattr(show, key))
