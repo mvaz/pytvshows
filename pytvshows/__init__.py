@@ -84,7 +84,8 @@ class TorrentWriteError(TorrentError): pass
 class TorrentTrackerError(TorrentError): pass
 class TorrentNoScrapeError(TorrentError): pass
 class EpisodeError(Exception): pass
-class EpisodeNoWorkingTorrentsError(Exception): pass
+class EpisodeNoWorkingTorrentsError(EpisodeError): pass
+class EpisodeQualityDelayError(EpisodeError): pass
 class ShowError(Exception): pass
 class ShowFeedError(ShowError): pass
 class ShowFeedNotModifiedError(ShowFeedError): pass
@@ -382,7 +383,11 @@ class _BaseEpisode(object):
         # quality
         for torrent in self.torrents:
             if torrent.quality == wanted_quality:
-                shortlist.append(torrent)
+                try:
+                    torrent.download_retry()
+                    shortlist.append(torrent)
+                except TorrentError, e:
+                    logging.info("Torrent download failed: %s" % e)
         # Second try : download the episodes for which the quality delay has
         # expired, with the best guess for quality
         if not shortlist:
@@ -400,26 +405,27 @@ class _BaseEpisode(object):
                         max_quality = torrent.quality
                 for torrent in self.torrents:
                     if torrent.quality == max_quality:
-                        shortlist.append(torrent)
+                        try:
+                            torrent.download_retry()
+                            shortlist.append(torrent)
+                        except TorrentError, e:
+                            logging.info("Torrent download failed: %s" % e)
+            else:
+                raise EpisodeQualityDelayError
+        if not shortlist:
+            raise EpisodeNoWorkingTorrentsError
         # Find best torrent out of our shortlist
         # TODO: check PROPER etc, check seed/leech ratio, etc
         # but for now...
         # This produces a list with the latest first
-        shortlist.sort(
-                    key=operator.attrgetter("published_time"), reverse=True)
-        for torrent in shortlist:
-            try:
-                torrent.download_retry()
-                return torrent
-            except TorrentError, e:
-                logging.info("Torrent download failed: %s" % e)
-        raise EpisodeNoWorkingTorrentsError
+        return sorted(shortlist,
+                      key=operator.attrgetter("published_time"), 
+                      reverse=True)[0]
     
     def save(self, quality=None):
         """Picks a suitable torrent for this episode (get_torrent), 
         saves it, then returns path saved to."""
-        torrent = self.get_torrent(quality)
-        return torrent.save()
+        return self.get_torrent(quality).save()
     
     def __str__(self):
         raise NotImplementedError
@@ -577,25 +583,17 @@ class Show(object):
         new_episodes = self.get_new_episodes()
         keys = sorted(new_episodes.keys())
         for key in keys:
-            # This here generates a list from our configured quality to
-            # the lowest available
-            l = range(min(config["quality_matches"].values()), 
-                config["quality"] + 1)
-            l.reverse()
-            for quality in l:
-                try:
-                    new_episodes[key].save(quality)
-                    self.last_key = key
-                    break
-                except EpisodeNoWorkingTorrentsError:
-                    if len(new_episodes[key].torrents) == 1:
-                        break
-                    logging.info("No torrents working for this quality (%s), "
-                                 "trying one lower..." % quality)
-            if self.last_key != key:
+            try:
+                new_episodes[key].save(config["quality"])
+                self.last_key = key
+            except EpisodeQualityDelayError:
+                logging.info("Delaying download of this episode to wait for "
+                             "a higher quality to be released.")
+            except EpisodeNoWorkingTorrentsError:
                 if key == keys[-1]:
                     # TODO: only warn about this once otherwise cron jobs
-                    #       will get oh-so-annoying
+                    #       will get oh-so-annoying. store in state file
+                    #       so we're only bugged once or twice
                     logging.warn("No working torrents found for %s. The "
                                  "download will be attempted again next "
                                  "time PyTVShows is run." 
