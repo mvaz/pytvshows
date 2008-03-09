@@ -53,7 +53,7 @@ import urlparse
 root_logger = logging.getLogger('')
 root_logger.setLevel(logging.DEBUG)
 console = logging.StreamHandler()
-console.setLevel(logging.INFO)
+console.setLevel(logging.WARN)
 formatter = logging.Formatter('%(levelname)-8s: %(message)s')
 console.setFormatter(formatter)
 root_logger.addHandler(console)
@@ -91,6 +91,7 @@ class ShowFeedError(ShowError): pass
 class ShowFeedNotModifiedError(ShowFeedError): pass
 class ShowFeedNoEpisodesError(ShowFeedError): pass
 class ShowDetailsError(ShowError): pass
+class ShowSpecial(Exception): pass
 
 class Torrent(object):
     """A single torrent file for an episode.
@@ -125,7 +126,7 @@ class Torrent(object):
         # TODO: there is no need downloading & checking each time tracker 
         #       fails split this up into downloading torrent and checking 
         #       tracker
-        logging.info("Downloading %s..." % self.url)
+        logging.debug("Downloading %s..." % self.url)
         request = urllib2.Request(self.url)
         request.add_header('User-Agent', USER_AGENT)
         try:
@@ -156,7 +157,7 @@ class Torrent(object):
         logging.debug('Torrent "%s" downloaded, %s bytes' 
                         % (torrent_dict['info']['name'], len(torrent_file)))
         # Check if trackers work
-        logging.info("Checking tracker (%s)..." % torrent_dict['announce'])
+        logging.debug("Checking tracker (%s)..." % torrent_dict['announce'])
         chosen_tracker = None
         no_scrape_trackers = []
         # Step 1: Check main tracker, make a note if it doesn't support scrape
@@ -167,19 +168,16 @@ class Torrent(object):
                                             torrent_dict, scrape=True)
                 chosen_tracker = torrent_dict['announce']
             except TorrentTrackerError, e:
-                logging.info("Tracker error: %s" % e)
+                logging.debug("Tracker error: %s" % e)
         except TorrentNoScrapeError:
             logging.debug("Tracker does not support scraping.")
             no_scrape_trackers.append(torrent_dict['announce'])
         # Step 2: Check announce-list trackers, again make a note of no scrape
         if not chosen_tracker:
-            logging.debug("announce doesn't work, checking announce-list")
-            if 'announce-list' not in torrent_dict \
-                    or not torrent_dict['announce-list']:
-                logging.debug("announce-list key not in torrent")
-            else:
+            if 'announce-list' in torrent_dict \
+                    and torrent_dict['announce-list']:
                 for url in torrent_dict['announce-list']:
-                    logging.info("Checking tracker (%s)..." % url)
+                    logging.debug("Checking tracker (%s)..." % url)
                     try:
                         scrape_url = self._get_scrape_url(url)
                         try:
@@ -188,7 +186,7 @@ class Torrent(object):
                             chosen_tracker = url
                             break
                         except TorrentTrackerError, e:
-                            logging.info("Tracker error: %s" % e)
+                            logging.debug("Tracker error: %s" % e)
                     except TorrentNoScrapeError:
                         logging.debug("Tracker does not support scraping.")
                         no_scrape_trackers.append(url)
@@ -258,7 +256,7 @@ class Torrent(object):
                 filename = "%s.torrent" % str(self.episode)
         filename = self._get_valid_filename(filename)
         path = os.path.join(directory, filename)
-        logging.info("Saving torrent to %s..." % path)
+        logging.debug("Saving torrent to %s..." % path)
         try:
             f = open(path, "w")
         except IOError, e:
@@ -278,7 +276,7 @@ class Torrent(object):
                 return self.download()
             except TorrentDownloadError, e:
                 if i < count:
-                    logging.info("Download attempt %s of %s failed: %s. "
+                    logging.debug("Download attempt %s of %s failed: %s. "
                                  "Retrying..." % (i, count, e))
                     i+=1
                 else:
@@ -387,7 +385,7 @@ class _BaseEpisode(object):
                     torrent.download_retry()
                     shortlist.append(torrent)
                 except TorrentError, e:
-                    logging.info("Torrent download failed: %s" % e)
+                    logging.warn("Torrent download failed: %s" % e)
         # Second try : download the episodes for which the quality delay has
         # expired, with the best guess for quality
         if not shortlist:
@@ -409,7 +407,7 @@ class _BaseEpisode(object):
                             torrent.download_retry()
                             shortlist.append(torrent)
                         except TorrentError, e:
-                            logging.info("Torrent download failed: %s" % e)
+                            logging.warn("Torrent download failed: %s" % e)
             else:
                 raise EpisodeQualityDelayError
         if not shortlist:
@@ -534,7 +532,6 @@ class Show(object):
         self.show_type = show_type
         self.last_key = last_key
         if isinstance(self.last_key, str):
-            logging.debug("last_key is a string, converting...")
             if self.show_type == "seasonepisode":
                 # convert string to tuple
                 self.last_key = \
@@ -584,17 +581,18 @@ class Show(object):
         keys = sorted(new_episodes.keys())
         for key in keys:
             try:
-                new_episodes[key].save(config["quality"])
+                filename = new_episodes[key].save(config["quality"])
                 self.last_key = key
+                logging.info("%s saved to %s" % (new_episodes[key], filename))
             except EpisodeQualityDelayError:
-                logging.info("Delaying download of this episode to wait for "
+                logging.debug("Delaying download of this episode to wait for "
                              "a higher quality to be released.")
             except EpisodeNoWorkingTorrentsError:
                 if key == keys[-1]:
                     # TODO: only warn about this once otherwise cron jobs
                     #       will get oh-so-annoying. store in state file
                     #       so we're only bugged once or twice
-                    logging.warn("No working torrents found for %s. The "
+                    logging.info("No working torrents found for %s. The "
                                  "download will be attempted again next "
                                  "time PyTVShows is run." 
                                 % new_episodes[key])
@@ -657,19 +655,25 @@ class Show(object):
             elif self.show_type == 'date':
                 r = re.compile('Episode\s*Date:\s*([0-9\-]+)$')
                 date_match = r.search(episode.description)
-                if date_match:
-                    date = datetime.datetime(*(time.strptime(
-                        date_match.group(1), "%Y-%m-%d")[0:6])).date()
-                    if date not in self.episodes:
-                        self.episodes[date] = EpisodeWithDate(self, date)
-                    self.episodes[date].add_torrent(
-                        url = episode.link,
-                        quality = self._get_quality(episode.title),
-                        published_time = 
-                            datetime.datetime(*episode.updated_parsed[:6]))
-                    if not last_key or date > last_key:
-                        last_key = date
-                else:
+                try:    
+                    if date_match:
+                        try:
+                            date = datetime.datetime(*(time.strptime(
+                                date_match.group(1), "%Y-%m-%d")[0:6])).date()
+                        except ValueError:
+                            raise ShowSpecial
+                        if date not in self.episodes:
+                            self.episodes[date] = EpisodeWithDate(self, date)
+                        self.episodes[date].add_torrent(
+                            url = episode.link,
+                            quality = self._get_quality(episode.title),
+                            published_time = 
+                               datetime.datetime(*episode.updated_parsed[:6]))
+                        if not last_key or date > last_key:
+                            last_key = date
+                    else:
+                        raise ShowSpecial
+                except ShowSpecial:
                     # er, different date. don't get confused ok?
                     date = self._add_special(episode)
                     if not last_special or date > last_special:
@@ -729,7 +733,7 @@ class Show(object):
         show_type."""
         if not self.rss:
             self._get_rss_feed()
-        logging.info("Getting details for %s..." % self)
+        logging.debug("Getting details for %s..." % self)
         if not self.rss['entries']:
             raise ShowFeedNoEpisodesError
         # Determine human title. We are assuming here that the first episode
@@ -800,7 +804,7 @@ class Show(object):
         """
         if not url:
             url = config['feed'] % self.exact_name
-        logging.info("Downloading and processing %s..." % url)
+        logging.debug("Downloading and processing %s..." % url)
         last_modified = None
         if self.feed_last_modified:
             last_modified = self.feed_last_modified.timetuple()

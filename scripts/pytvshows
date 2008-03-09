@@ -52,9 +52,9 @@ Options:
                     If checking feeds, path to config file. 
                     Default: ~/.pytvshows/config
   -d, --daemon      Run as a daemon in the background. (NOT IMPLEMENTED)
-  -v, --verbose     Increase verbosity level.
-  -q, --quiet       Decrease verbosity level. Use once to reduce messages to a 
-                    sensible level for cron jobs (WARN).
+  -v, --verbose     Increase verbosity level. Default is sensible for cron 
+                    jobs.
+  -q, --quiet       Decrease verbosity level.
   
 Configuration options (overrides values in config file):
   -F FEED, --feed=FEED
@@ -98,6 +98,7 @@ config = {
 # Merge and conjoin the script and library config defaults
 config.update(pytvshows.config)
 pytvshows.config = config
+pytvshows.console.setLevel(logging.INFO)
 
 class Usage(Exception):
     def __init__(self, msg):
@@ -161,16 +162,18 @@ def main(argv=None):
         return 2
     
     logging.debug("pytvshows %s" % __version__)
-    logging.debug("Log level: DEBUG")
     
     # COMMANDS
     if len(args) > 0:
         if args[0] == 'download':
             logging.error("Not implemented")
+            return 1
         elif args[0] == 'list-shows':
             logging.error("Not implemented")
+            return 1
         else:
             logging.error("Unrecognised command: '%s'" % args[0])
+            return 1
     
     # CHECK FEEDS
     else:
@@ -260,7 +263,7 @@ def main(argv=None):
         state_obj = ConfigParser.ConfigParser()
         state_obj.read(config['state-file'])
         if len(state_obj.sections()) == 0:
-            logging.warn("State file empty, starting from scratch.")
+            logging.info("State file empty, starting from scratch.")
         # Shows
         for exact_name in config_obj.sections():
             if exact_name == 'pytvshows':
@@ -278,12 +281,12 @@ def main(argv=None):
             for key in args.keys():
                 if state_obj.has_option(exact_name, key):
                     args[key] = state_obj.get(exact_name, key)
-            logging.info("Getting episodes for %s..." % exact_name)
+            logging.debug("Getting episodes for %s..." % exact_name)
             show = pytvshows.Show(exact_name, **args)
             try:
                 show.save_new_episodes()
             except pytvshows.ShowFeedNotModifiedError:
-                logging.info("Feed hasn't changed since last check.")
+                logging.debug("Feed hasn't changed since last check.")
             except pytvshows.ShowFeedNoEpisodesError:
                 logging.warn("Could not find any episodes for %s." % show)
             except pytvshows.ShowDetailsError, e:
