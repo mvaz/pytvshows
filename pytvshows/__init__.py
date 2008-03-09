@@ -366,16 +366,12 @@ class _BaseEpisode(object):
         #elif len(self.torrents) == 1:
         #    raise EpisodeNoWorkingTorrentsError
         
-        # Find the highest quality available in the feed. This is to avoid
+        # Use the highest quality available in the feed. This is to avoid
         # delays trying to find a higher quality torrent if there's really
         # no chance of finding one.
         # The only disadvantage to this method is when a higher quality 
         # episode does actually pop up, we will probably miss the first one.
-        best_quality = 0
-        for torrent in self.torrents:
-            if torrent.quality > best_quality:
-                best_quality = torrent.quality
-        wanted_quality = min(quality, best_quality)
+        wanted_quality = min(quality, self.show.best_quality)
         shortlist = []
         # First try : download the episodes for which we have the wanted
         # quality
@@ -573,6 +569,7 @@ class Show(object):
                 "datetime.datetime object"
         self.rss = None
         self.episodes = {}
+        self.best_quality = 0
         self.specials = {} # FIXME QUICK!!!: actually download these
 
     def save_new_episodes(self):
@@ -781,6 +778,8 @@ class Show(object):
         """Given title string, returns quality integer."""
         for key, value in config["quality_matches"].items():
             if key in s:
+                if value > self.best_quality:
+                    self.best_quality = value
                 return value
         return 0
     
