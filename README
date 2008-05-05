@@ -5,6 +5,12 @@ pytvshows downloads torrents for TV shows from RSS feeds provided by
 tvRSS.net. It is designed to be run from cron or a shell for programs like 
 rTorrent. It is based on TVShows (http://tvshows.sourceforge.net/).
 
+Dependencies
+------------
+
+- feedparser - http://www.feedparser.org/ (python-feedparser on Debian 
+  and Ubuntu)
+
 Installation
 ------------
 
