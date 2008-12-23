@@ -1,11 +1,6 @@
 #!/usr/bin/env python
 
-import ez_setup
-# install fails completely if setuptools is installed but isn't latest 
-# without version specified here.
-ez_setup.use_setuptools(version="0.6c1")
-
-from setuptools import setup, find_packages
+from distutils.core import setup
 
 def normalizeWhitespace(s):
     return ' '.join(s.split())
@@ -35,8 +30,5 @@ setup(
     
     scripts = ['scripts/pytvshows',],
     packages = ['pytvshows',],
-    
-    install_requires = [
-        'FeedParser>=4.0',
-        ],
     )
+

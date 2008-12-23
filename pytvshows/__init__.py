@@ -36,7 +36,12 @@ import pytvshows.bencode as bencode
 import pytvshows.logger as logging
 
 import datetime
-import feedparser
+try:
+    import feedparser
+except ImportError:
+    logging.error("PyTVShows depends on feedparser 4.1 "
+                  "(http://feedparser.org/)")
+    sys.exit(1)
 import operator
 import os
 import re
