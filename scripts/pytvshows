@@ -76,9 +76,9 @@ Configuration options (overrides values in config file):
   -p FILE, --pid-file=FILE
                     Path to daemon PID file. Default: ~/.pytvshows/pid
   -Q QUAL, --quality=QUAL
-                    The TV show quality required. 'normal', 'high' or 
-                    'veryhigh', where 'high' is high resolution and 'veryhigh'
-                    is 720p. Default: normal
+                    The preferred and maximum quality that will be downloaded.
+                    'normal', 'high' or 'veryhigh', where 'high' is high 
+                    resolution and 'veryhigh' is 720p. Default: normal
   -s FILE, --state-file=FILE
                     Path to state file. Default: ~/.pytvshows/state
   -x FILE, --socket-file=FILE
