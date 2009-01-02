@@ -19,6 +19,14 @@ if not hasattr(sys, "version_info") or sys.version_info < (2,4):
 import pytvshows.bencode as bencode
 import pytvshows.logger as logging
 
+root_logger = logging.getLogger('')
+root_logger.setLevel(logging.DEBUG)
+console = logging.StreamHandler()
+console.setLevel(logging.WARN)
+formatter = logging.Formatter('%(levelname)-8s: %(message)s')
+console.setFormatter(formatter)
+root_logger.addHandler(console)
+
 import datetime
 try:
     import feedparser
@@ -39,17 +47,9 @@ import urllib
 import urllib2
 import urlparse
 
-root_logger = logging.getLogger('')
-root_logger.setLevel(logging.DEBUG)
-console = logging.StreamHandler()
-console.setLevel(logging.WARN)
-formatter = logging.Formatter('%(levelname)-8s: %(message)s')
-console.setFormatter(formatter)
-root_logger.addHandler(console)
-
 # library config defaults (script config can be found in scripts/pytvshows)
 config = {
-    'feed': "http://tvrss.net/search/index.php?show_name=%s&show_name_exact" \
+    'feed': "http://tvrss.net/search/index.php?show_name=%s&show_name_exact"
             "=true&mode=rss",
     'output-directory': os.path.expanduser("~/"),
     'output-directory2': None,
@@ -80,7 +80,6 @@ class ShowFeedError(ShowError): pass
 class ShowFeedNotModifiedError(ShowFeedError): pass
 class ShowFeedNoEpisodesError(ShowFeedError): pass
 class ShowDetailsError(ShowError): pass
-class ShowSpecial(Exception): pass
 
 class Torrent(object):
     """A single torrent file for an episode.
@@ -106,9 +105,9 @@ class Torrent(object):
         
     def download(self):
         """Download this torrent and store the bdecoded dictionary and
-        the torrent file in the dict and file attributes respectively.
+        the torrent file in the dict and file properties respectively.
         The first successful tracker response is stored in the 
-        tracker_response attribute.
+        tracker_response property.
         
         Returns the torrent as a bdecoded dictionary.
         """
@@ -320,7 +319,7 @@ class Torrent(object):
         return re.sub(r'[^-A-Za-z0-9_\[\]. ]', '', s)
         
 class _BaseEpisode(object):
-    """The parent class for any episode object. Do not access directly."""
+    """The abstract class for an episode object."""
     def __init__(self, show, key):
         self.show = show
         self.key = key
@@ -416,8 +415,7 @@ class _BaseEpisode(object):
 class Episode(_BaseEpisode):
     """Represents an episode that can be classified by no other way other
     than the date and time that the torrent was published. By definition, 
-    only one torrent is allowed. 
-    Main use in show_type: time
+    only one torrent is allowed. Used in the "time" show type.
     
     Arguments:
     show - Show object that this episode belongs to
@@ -438,8 +436,8 @@ class Episode(_BaseEpisode):
 
 class EpisodeWithSeasonAndEpisode(_BaseEpisode):
     """Represents an episode classified by a season number and an episode 
-    number.
-    Main use in show_type: seasonepisode
+    number. Used in the "seasonepisode" show type.
+    
     For example, "Lost".
     
     Arguments:
@@ -450,9 +448,8 @@ class EpisodeWithSeasonAndEpisode(_BaseEpisode):
         return "%s %02dx%02d" % (self.show, self.key[0], self.key[1])
 
 class EpisodeWithDate(_BaseEpisode):
-    """Represents an episode classified by a date.
-    Main use in show_type: date. Also used for specials.
-    For example, "The Daily Show".
+    """Represents an episode classified by a date. For example, "The Daily 
+    Show". Used in the "date" show type.
     
     Arguments:
     show - Show object that this episode belongs to
@@ -460,13 +457,26 @@ class EpisodeWithDate(_BaseEpisode):
     """
     def __str__(self):
         return "%s %s" % (self.show, self.key)
+
+class SpecialEpisode(EpisodeWithDate):
+    """Represents an episode that does not fit into the show type.
     
+    Specials are keyed by published_date, so if two specials are published on 
+    the same date, they are considered the same.
+    
+    Arguments:
+    show - Show object that this episode belongs to
+    published_date - Date of show's airing as a date object
+    """
+    def __str__(self):
+        return "%s %s [special]" % (self.show, self.key)
+
 class EpisodeWithTitle(Episode):
-    """Represents an episode with a title to identify it. It is an extension
-    of Episode, so only one torrent is allowed. The only difference is the 
-    title attribute, which should be unique within a show.
-    Main use in show_type: title
-    For example "Discovery Channel".
+    """Represents an episode with a title to identify it. For example "Discovery 
+    Channel". Used in the "title" show type.
+    
+    It is an extension of Episode, so only one torrent is allowed. The only 
+    difference is the title property, which should be unique within a show.
     
     Arguments:
     show - Show object that this episode belongs to
@@ -558,55 +568,68 @@ class Show(object):
                 "datetime.datetime object"
         self.rss = None
         self.episodes = {}
+        self.specials = {}
         self.best_quality = 0
-        self.specials = {} # FIXME QUICK!!!: actually download these
 
     def save_new_episodes(self):
-        """Saves new episodes and sets and returns the new last_key."""
-        new_episodes = self.get_new_episodes()
-        keys = sorted(new_episodes.keys())
-        for key in keys:
-            try:
-                filename = new_episodes[key].save(config["quality"])
+        """Saves new episodes and sets both last_key and last_special.
+        
+        Returns a (episodes, specials) tuple containing dictionaties of the 
+        episodes and specials downloaded."""
+        new_episodes, new_specials = self.get_new_episodes()
+        for key in sorted(new_episodes.keys()):
+            if self._save_episode(new_episodes[key]):
                 self.last_key = key
-                logging.info("%s saved to %s" % (new_episodes[key], filename))
+        for key in sorted(new_specials.keys()):
+            if self._save_episode(new_specials[key]):
+                self.last_special = key
+        return (new_episodes, new_specials)
+
+    def _save_episode(self, episode):
+            try:
+                filename = episode.save(config["quality"])
+                logging.info("%s saved to %s" % (episode, filename))
+                return True
             except EpisodeQualityDelayError:
                 logging.debug("Delaying download of this episode to wait for "
                              "a higher quality to be released.")
             except EpisodeNoWorkingTorrentsError:
-                if key == keys[-1]:
+                #if key == keys[-1]:
                     # TODO: only warn about this once otherwise cron jobs
                     #       will get oh-so-annoying. store in state file
                     #       so we're only bugged once or twice
-                    logging.info("No working torrents found for %s. The "
-                                 "download will be attempted again next "
-                                 "time PyTVShows is run." 
-                                % new_episodes[key])
-                else:
+                #    logging.info("No working torrents found for %s. The "
+                #                 "download will be attempted again next "
+                #                 "time PyTVShows is run." 
+                #                % new_episodes[key])
+                #else:
                     # TODO: store failed torrents in the state file for
                     #       retrying
-                    logging.warn("No working torrents found for %s. You "
-                                 "may want to download it manually." 
-                                 % new_episodes[key])
-        return self.last_key
+                logging.warn("No working torrents found for %s." % episode)
+            return False
 
     def get_new_episodes(self):
-        """Returns dictionary of new episodes (ie, where key > last_key).
-        Runs get_episodes() if it hasn't been already."""
-        if not self.episodes:
+        """Returns a (episodes, specials) tuple with dictionaries of new 
+        episodes and specials.
+        """
+        if not self.episodes and not self.specials:
             self.get_episodes()
         new_episodes = {}
         for key, episode in self.episodes.items():
             if key > self.last_key:
                 new_episodes[key] = episode
-        return new_episodes
+        new_specials = {}
+        for key, episode in self.specials.items():
+            if key > self.last_special:
+                new_specials[key] = episode
+        return (new_episodes, new_specials)
 
     def get_episodes(self):
-        """Downloads episode information and returns dictionary of episode 
-        objects, also stored in the episodes attribute. Updates last_key
-        and last_special. Specials are also stored in the attribute 
-        specials. Runs get_details() if not details have been provided and 
-        it hasn't been run already."""
+        """Downloads episode information and returns a (episodes, specials) 
+        tuple with dictionaries of episodes and specials, also stored in the 
+        episodes and specials properties.
+        
+        Updates last_key and last_special. Runs get_details() if necessary."""
         if not self.rss:
             self._get_rss_feed()
         if not self.rss['entries']:
@@ -614,8 +637,8 @@ class Show(object):
         if not self.show_type:
             self.get_details()
         episodes = {}
-        last_key = None
-        last_special = None
+        keys = []
+        special_keys = []
         for episode in self.rss['entries']:
             if self.show_type == 'seasonepisode':
                 r = re.compile('Season\s*: ([0-9]*?);')
@@ -632,22 +655,19 @@ class Show(object):
                         quality = self._get_quality(episode.title),
                         published_time = 
                             datetime.datetime(*episode.updated_parsed[:6]))
-                    if not last_key or se > last_key:
-                        last_key = se
+                    keys.append(se)
                 else:
-                    date = self._add_special(episode)
-                    if not last_special or date > last_special:
-                        last_special = date
+                    special_keys.append(self._add_special(episode))
             elif self.show_type == 'date':
                 r = re.compile('Episode\s*Date:\s*([0-9\-]+)$')
                 date_match = r.search(episode.description)
-                try:    
-                    if date_match:
-                        try:
-                            date = datetime.datetime(*(time.strptime(
-                                date_match.group(1), "%Y-%m-%d")[0:6])).date()
-                        except ValueError:
-                            raise ShowSpecial
+                if date_match:
+                    try:
+                        date = datetime.datetime(*(time.strptime(
+                            date_match.group(1), "%Y-%m-%d")[0:6])).date()
+                    except ValueError:
+                        special_keys.append(self._add_special(episode))
+                    else:
                         if date not in self.episodes:
                             self.episodes[date] = EpisodeWithDate(self, date)
                         self.episodes[date].add_torrent(
@@ -655,15 +675,9 @@ class Show(object):
                             quality = self._get_quality(episode.title),
                             published_time = 
                                datetime.datetime(*episode.updated_parsed[:6]))
-                        if not last_key or date > last_key:
-                            last_key = date
-                    else:
-                        raise ShowSpecial
-                except ShowSpecial:
-                    # er, different date. don't get confused ok?
-                    date = self._add_special(episode)
-                    if not last_special or date > last_special:
-                        last_special = date
+                        keys.append(date)
+                else:
+                    special_keys.append(self._add_special(episode))
             elif self.show_type == "title":
                 r = re.compile('Show\s*Title\s*:\s*(.*?);')
                 title_match = r.search(episode.description)
@@ -685,12 +699,9 @@ class Show(object):
                             torrent_url = episode.link,
                             quality = self._get_quality(episode.title), 
                             published_time = published_time)
-                    if not last_key or published_time > last_key:
-                        last_key = published_time
+                    keys.append(published_time)
                 else:
-                    date = self._add_special(episode)
-                    if not last_special or date > last_special:
-                        last_special = date
+                    special_keys.append(self._add_special(episode))
             elif self.show_type == "time":
                 published_time \
                         = datetime.datetime(* episode.updated_parsed[:6])
@@ -701,21 +712,20 @@ class Show(object):
                         torrent_url = episode.link,
                         quality = self._get_quality(episode.title), 
                         published_time = published_time)
-                    if not last_key or published_time > last_key:
-                        last_key = published_time
+                    keys.append(published_time)
                 # No specials for time
             else:
                 # We really shouldn't get here
                 raise ShowError, "Unrecognised show_type"
-        if not self.last_key:
-            self.last_key = last_key
-        if not self.last_special:
-            self.last_special = last_special
-        return self.episodes
+        if keys and not self.last_key:
+            self.last_key = max(keys)
+        if special_keys and not self.last_special:
+            self.last_special = max(special_keys)
+        return (self.episodes, self.specials)
         
     def get_details(self):
         """If details are missing, fetches the human_name and show_type
-        from the RSS feed. Returns dictionary with keys huma_name and 
+        from the RSS feed. Returns dictionary with keys human_name and 
         show_type."""
         if not self.rss:
             self._get_rss_feed()
@@ -774,9 +784,10 @@ class Show(object):
     
     def _add_special(self, episode):
         """Adds a special episode from feed entry. Returns date of special."""
+        # We allow one special per day to avoid duplicates.
         date = datetime.datetime(*episode.updated_parsed[:6]).date()
         if date not in self.specials:
-            self.specials[date] = EpisodeWithDate(self, date)
+            self.specials[date] = SpecialEpisode(self, date)
         self.specials[date].add_torrent(
             url = episode.link,
             quality = self._get_quality(episode.title),
@@ -785,7 +796,7 @@ class Show(object):
         return date
     
     def _get_rss_feed(self, url=None):
-        """Returns the feedparser object and stores it in the rss attribute.
+        """Returns the feedparser object and stores it in the rss property.
         
         Arguments:
         url - Feed URL to download. Default: "feed" in config.
