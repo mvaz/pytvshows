@@ -839,7 +839,10 @@ class Show(object):
                 raise ShowFeedError, "%s: %s" \
                     % (r.get("bozo_exception", "can't process"), f.url)
         self.rss = r
-        self.feed_etag = r.etag
+        try:
+            self.feed_etag = r.etag
+        except AttributeError:
+            pass
         if hasattr(r, "modified"):
             self.feed_last_modified = datetime.datetime(* r.modified[:6])
         else:
